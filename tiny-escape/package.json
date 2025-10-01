@@ -13,5 +13,10 @@
   },
   "dependencies": {
     "three": "^0.180.0"
-  }
+  },
+  "main": "vite.config.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
 }
