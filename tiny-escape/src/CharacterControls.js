@@ -221,67 +221,77 @@ export class CharacterControls {
 
     toggleCameraMode() {
         if (this.cameraMode === 'third') {
-            this.cameraMode = 'first'
-            this.orbitControl.enabled = false
+            this.cameraMode = 'first';
+            this.orbitControl.enabled = false;
 
             this._savedCameraState = {
                 position: this.camera.position.clone(),
                 quaternion: this.camera.quaternion.clone(),
                 target: this.orbitControl.target.clone()
-            }
+            };
 
             if (this.model.parent && this.fpsYaw.parent !== this.model.parent) {
-                this.model.parent.add(this.fpsYaw)
+                this.model.parent.add(this.fpsYaw);
             }
+
             this.fpsYaw.position.set(
                 this.model.position.x,
                 this.model.position.y + this.firstPersonHeight,
                 this.model.position.z
-            )
-            const modelEuler = new THREE.Euler().setFromQuaternion(this.model.quaternion, 'YXZ')
-            this.fpsYaw.rotation.set(0, modelEuler.y, 0)
-            this.fpsPitch.rotation.set(0, 0, 0)
+            );
 
-            this.fpsCameraHolder.add(this.camera)
-            this.camera.position.set(0, 0, 0)
-            this.camera.rotation.set(0, 0, 0)
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.model.quaternion);
+            const yaw = Math.atan2(forward.x, forward.z);
+            this.fpsYaw.rotation.set(0, yaw, 0);
 
-            this._modelVisibleBeforeFPS = this.model.visible
-            this.model.visible = false
+            // Reset pitch
+            this.fpsPitch.rotation.set(0, 0, 0);
 
-            this._installPointerLock()
+            // Attach camera to FPS rig
+            this.fpsCameraHolder.add(this.camera);
+            this.camera.position.set(0, 0, 0);
+            this.camera.rotation.set(0, 0, 0);
+
+            this._modelVisibleBeforeFPS = this.model.visible;
+            this.model.visible = false;
+
+            this._installPointerLock();
         } else {
-            this.cameraMode = 'third'
-            this.model.visible = this._modelVisibleBeforeFPS ?? true
+            this.cameraMode = 'third';
 
-            this._removePointerLock()
+            this.model.visible = this._modelVisibleBeforeFPS ?? true;
 
-            this.fpsCameraHolder.remove(this.camera)
-            const parent = this.model.parent || this.fpsYaw.parent
-            if (parent) parent.add(this.camera)
-            if (this.fpsYaw.parent) this.fpsYaw.parent.remove(this.fpsYaw)
+            this._removePointerLock();
+
+            // Detach camera from FPS rig
+            this.fpsCameraHolder.remove(this.camera);
+            const parent = this.model.parent || this.fpsYaw.parent;
+            if (parent) parent.add(this.camera);
+            if (this.fpsYaw.parent) this.fpsYaw.parent.remove(this.fpsYaw);
 
             if (this._savedCameraState) {
-                this.camera.position.copy(this._savedCameraState.position)
-                this.camera.quaternion.copy(this._savedCameraState.quaternion)
-                this.orbitControl.target.copy(this._savedCameraState.target)
+                this.camera.position.copy(this._savedCameraState.position);
+                this.camera.quaternion.copy(this._savedCameraState.quaternion);
+                this.orbitControl.target.copy(this._savedCameraState.target);
             } else {
-                const desired = this.getThirdPersonCameraPos()
-                this.camera.position.copy(desired)
+                const desired = this.getThirdPersonCameraPos();
+                this.camera.position.copy(desired);
                 this.cameraTarget.set(
                     this.model.position.x,
                     this.model.position.y + 1,
                     this.model.position.z
-                )
-                this.orbitControl.target.copy(this.cameraTarget)
+                );
+                this.orbitControl.target.copy(this.cameraTarget);
             }
 
-            this.orbitControl.enabled = true
-            this.orbitControl.minDistance = this._thirdPersonMin
-            this.orbitControl.maxDistance = this._thirdPersonMax
-            this.orbitControl.update()
+            // Re-enable orbit controls
+            this.orbitControl.enabled = true;
+            this.orbitControl.minDistance = this._thirdPersonMin;
+            this.orbitControl.maxDistance = this._thirdPersonMax;
+            this.orbitControl.update();
         }
     }
+
 
     _installPointerLock() {
         const element = document.body
