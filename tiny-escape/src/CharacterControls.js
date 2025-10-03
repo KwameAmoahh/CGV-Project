@@ -26,6 +26,10 @@ export class CharacterControls {
         this.velocityY = 0
         this.isOnGround = true
 
+        // Environment + collision
+        this.environment = null
+        this.playerRadius = 0.12
+
         this.cameraMode = 'third'
         this.firstPersonHeight = 1.6
         this.firstPersonForwardOffset = 0.1
@@ -108,29 +112,33 @@ export class CharacterControls {
         let moveZ = 0
 
         if (this.currentAction === 'run' || this.currentAction === 'walk') {
-            const speed = this.currentAction === 'run' ? this.runVelocity : this.walkVelocity
+            // Surface effects
+            let surfaceMultiplier = 1
+            if (this.environment) {
+                const surface = this.environment.getSurfaceAt(this.model.position)
+                if (surface === 'slippery') surfaceMultiplier = 1.15
+                if (surface === 'sticky') surfaceMultiplier = 0.5
+            }
+
+            const baseSpeed = this.currentAction === 'run' ? this.runVelocity : this.walkVelocity
+            const speed = baseSpeed * surfaceMultiplier
+
+            // Compute desired movement in local plane
+            let desiredMove = new THREE.Vector3(0, 0, 0)
 
             if (this.cameraMode === 'first') {
                 const forward = new THREE.Vector3()
                 this.camera.getWorldDirection(forward)
                 forward.y = 0
-                if (forward.lengthSq() === 0) {
-                    forward.set(0, 0, -1)
-                }
+                if (forward.lengthSq() === 0) forward.set(0, 0, -1)
                 forward.normalize()
 
                 const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize()
-                const moveDir = new THREE.Vector3()
-
-                if (keysPressed[W]) moveDir.add(forward)
-                if (keysPressed[S]) moveDir.sub(forward)
-                if (keysPressed[A]) moveDir.sub(right)
-                if (keysPressed[D]) moveDir.add(right)
-
-                if (moveDir.lengthSq() > 0) {
-                    moveDir.normalize()
-                    this.model.position.addScaledVector(moveDir, speed * delta)
-                }
+                if (keysPressed[W]) desiredMove.add(forward)
+                if (keysPressed[S]) desiredMove.sub(forward)
+                if (keysPressed[A]) desiredMove.sub(right)
+                if (keysPressed[D]) desiredMove.add(right)
+                if (desiredMove.lengthSq() > 0) desiredMove.normalize()
             } else {
                 const angleYCameraDirection = Math.atan2(
                     this.camera.position.x - this.model.position.x,
@@ -146,20 +154,41 @@ export class CharacterControls {
                 this.walkDirection.y = 0
                 this.walkDirection.normalize()
                 this.walkDirection.applyAxisAngle(this.rotateAngle, offset)
-
-                moveX = this.walkDirection.x * speed * delta
-                moveZ = this.walkDirection.z * speed * delta
-
-                this.model.position.x += moveX
-                this.model.position.z += moveZ
+                desiredMove.copy(this.walkDirection)
             }
+
+            // Apply speed and delta
+            desiredMove.multiplyScalar(speed * delta)
+
+            // Candidate position before collision resolution
+            const currentPos = this.model.position.clone()
+            const candidatePos = currentPos.clone().add(desiredMove)
+
+            // Resolve horizontal collisions if environment present
+            let resolvedPos = candidatePos
+            if (this.environment) {
+                resolvedPos = this.environment.resolveCollision(currentPos, candidatePos, this.playerRadius)
+            }
+
+            moveX = resolvedPos.x - currentPos.x
+            moveZ = resolvedPos.z - currentPos.z
+
+            // Apply horizontal movement
+            this.model.position.copy(resolvedPos)
         }
 
-        // Apply gravity / jump physics
+        // Apply gravity / jump physics against environment ground if available
         this.velocityY += this.gravity * delta
         this.model.position.y += this.velocityY * delta
-        if (this.model.position.y <= 0) {
-            this.model.position.y = 0
+
+        let groundY = 0
+        if (this.environment) {
+            const info = this.environment.getGroundInfo(this.model.position)
+            if (info && typeof info.y === 'number') groundY = info.y
+        }
+
+        if (this.model.position.y <= groundY) {
+            this.model.position.y = groundY
             this.velocityY = 0
             this.isOnGround = true
         } else {
@@ -193,6 +222,10 @@ export class CharacterControls {
                 this.model.position.z
             )
         }
+    }
+
+    setEnvironment(env) {
+        this.environment = env
     }
 
     directionOffset(keysPressed) {
