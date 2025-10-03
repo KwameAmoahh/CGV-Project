@@ -11,7 +11,7 @@ scene.background = new THREE.Color(0xa8def0)
 const camera = new THREE.PerspectiveCamera(
   45,
   window.innerWidth / window.innerHeight,
-  0.1,
+  0.02,
   1000
 )
 // Start further back and higher up
@@ -41,17 +41,20 @@ addFloor()
 
 // MODEL + ANIMATIONS
 let characterControls
-new GLTFLoader().load('assets/models/Untitled.glb', (gltf) => {
+new GLTFLoader().load('assets/models/lastone.glb', (gltf) => {
     const model = gltf.scene
     model.traverse((obj) => { if (obj.isMesh) obj.castShadow = true })
     scene.add(model)
 
     const mixer = new THREE.AnimationMixer(model)
     const animationsMap = new Map()
-    console.log("✅ Animations found:", gltf.animations.map(a => a.name))
+    console.log('Animations found:', gltf.animations.map(a => a.name))
 
     gltf.animations.forEach((clip) => {
-        animationsMap.set(clip.name, mixer.clipAction(clip))
+        const action = mixer.clipAction(clip)
+        // Keep original key and a lowercase alias for robust lookups
+        animationsMap.set(clip.name, action)
+        animationsMap.set(clip.name.toLowerCase(), action)
     })
 
     // Start with lowercase "idle"
@@ -66,6 +69,10 @@ document.addEventListener('keydown', (event) => {
     keyDisplayQueue.down(event.key)
     if (event.shiftKey && characterControls) {
         characterControls.switchRunToggle()
+    } else if (event.key.toLowerCase() === 'c' && characterControls) {
+        characterControls.toggleCameraMode()
+    } else if ((event.code === 'Space' || event.key === ' ') && characterControls) {
+        characterControls.jump()
     } else {
         keysPressed[event.key.toLowerCase()] = true
     }
@@ -81,7 +88,10 @@ const clock = new THREE.Clock()
 function animate() {
     let delta = clock.getDelta()
     if (characterControls) characterControls.update(delta, keysPressed)
-    orbitControls.update()
+    // Only update OrbitControls in third-person; FPS manages camera itself
+    if (!characterControls || characterControls.cameraMode === 'third') {
+        orbitControls.update()
+    }
     renderer.render(scene, camera)
     requestAnimationFrame(animate)
 }
