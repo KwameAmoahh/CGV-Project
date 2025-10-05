@@ -1,6 +1,7 @@
 import { KeyDisplay } from './utils.js'
 import { CharacterControls } from './CharacterControls.js'
 import { Environment } from './environment.js'
+import { UI } from './ui.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -30,8 +31,8 @@ document.body.appendChild(renderer.domElement)
 // CONTROLS
 const orbitControls = new OrbitControls(camera, renderer.domElement)
 orbitControls.enableDamping = true
-orbitControls.minDistance = 5
-orbitControls.maxDistance = 15
+orbitControls.minDistance = 1.0
+orbitControls.maxDistance = 4.0
 orbitControls.enablePan = false
 orbitControls.maxPolarAngle = Math.PI / 2 - 0.05
 orbitControls.update()
@@ -45,6 +46,13 @@ const environment = new Environment(scene)
 
 // MODEL + ANIMATIONS
 let characterControls
+let gameState = 'menu'
+const ui = new UI({
+    onStart: () => { gameState = 'playing'; ui.showMenu(false); },
+    onNew: () => { restartGame(); },
+    onResume: () => { gameState = 'playing'; ui.showPause(false); },
+    onExit: () => { window.location.reload(); }
+})
 new GLTFLoader().load('assets/models/lastone.glb', (gltf) => {
     const model = gltf.scene
     model.traverse((obj) => { if (obj.isMesh) obj.castShadow = true })
@@ -66,10 +74,14 @@ new GLTFLoader().load('assets/models/lastone.glb', (gltf) => {
     // Start with lowercase "idle"
     characterControls = new CharacterControls(model, mixer, animationsMap, orbitControls, camera, 'idle')
     characterControls.setEnvironment(environment)
+    environment.setPlayerRef(model, characterControls.playerRadius)
 
     // Spawn inside fridge once products are also placed to avoid overlap
     const placeInside = () => {
-        const spawn = environment.getSpawnPoint ? environment.getSpawnPoint() : null
+        const topShelf = environment.getTopShelfSpawn ? environment.getTopShelfSpawn() : null
+        const eggs = environment.getEggsSpawnPoint ? environment.getEggsSpawnPoint() : null
+        const pref = topShelf || eggs || (environment.getTopSideBottomShelfSpawn ? environment.getTopSideBottomShelfSpawn() : null)
+        const spawn = pref || (environment.getSpawnPoint ? environment.getSpawnPoint() : null)
         if (spawn) {
             model.position.copy(spawn)
             // Reposition camera behind the shrunken player
@@ -91,6 +103,12 @@ const keyDisplayQueue = new KeyDisplay()
 
 document.addEventListener('keydown', (event) => {
     keyDisplayQueue.down(event.key)
+    if (event.key === 'Escape') {
+        if (gameState === 'playing') { gameState = 'paused'; ui.showPause(true) }
+        else if (gameState === 'paused') { gameState = 'playing'; ui.showPause(false) }
+        return
+    }
+    if (gameState !== 'playing') return
     if (event.shiftKey && characterControls) {
         characterControls.switchRunToggle()
     } else if (event.key.toLowerCase() === 'c' && characterControls) {
@@ -99,7 +117,9 @@ document.addEventListener('keydown', (event) => {
         characterControls.jump()
     } else if (event.key.toLowerCase() === 'r' && characterControls) {
         // Respawn to a safe spot inside the fridge if stuck
-        const spawn = (environment.getSafeSpawnPoint && environment.getSafeSpawnPoint()) || (environment.getSpawnPoint && environment.getSpawnPoint())
+        const spawn = (environment.getTopShelfSpawn && environment.getTopShelfSpawn()) ||
+                      (environment.getSafeSpawnPoint && environment.getSafeSpawnPoint()) ||
+                      (environment.getSpawnPoint && environment.getSpawnPoint())
         if (spawn) {
             characterControls.model.position.copy(spawn)
             const desiredCam = characterControls.getThirdPersonCameraPos()
@@ -114,21 +134,24 @@ document.addEventListener('keydown', (event) => {
 
 document.addEventListener('keyup', (event) => {
     keyDisplayQueue.up(event.key)
-    keysPressed[event.key.toLowerCase()] = false
+    if (gameState === 'playing') keysPressed[event.key.toLowerCase()] = false
 }, false)
 
 // ANIMATE
 const clock = new THREE.Clock()
 function animate() {
     let delta = clock.getDelta()
-    if (characterControls) {
+    if (characterControls && gameState === 'playing') {
         characterControls.update(delta, keysPressed)
         // Check goal button
         if (environment.isAtExitButton && environment.isAtExitButton(characterControls.model.position)) {
             environment.openDoor()
         }
+        // Chef alert when outside the fridge bounds
+        const inside = environment.isInsideFridgeWorld ? environment.isInsideFridgeWorld(characterControls.model.position) : true
+        ui.showAlert(!inside)
     }
-    environment.update(delta)
+    if (gameState === 'playing') environment.update(delta)
     // Only update OrbitControls in third-person; FPS manages camera itself
     if (!characterControls || characterControls.cameraMode === 'third') {
         orbitControls.update()
@@ -167,4 +190,22 @@ function addLights() {
     dirLight.castShadow = true
     dirLight.shadow.mapSize.set(2048, 2048)
     scene.add(dirLight)
+}
+
+function restartGame() {
+    // Reset player to spawn
+    if (!characterControls) return
+    environment.onReady(() => {
+        const spawn = (environment.getSafeSpawnPoint && environment.getSafeSpawnPoint()) || environment.getSpawnPoint()
+        if (spawn) {
+            characterControls.model.position.copy(spawn)
+            const desiredCam = characterControls.getThirdPersonCameraPos()
+            camera.position.copy(desiredCam)
+            characterControls.updateCameraTarget(0, 0)
+            orbitControls.update()
+        }
+    })
+    gameState = 'playing'
+    ui.showMenu(false)
+    ui.showPause(false)
 }

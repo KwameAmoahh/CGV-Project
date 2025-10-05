@@ -31,10 +31,10 @@ export class CharacterControls {
         this.playerRadius = 0.12
 
         this.cameraMode = 'third'
-        this.firstPersonHeight = 1.6
+        this.firstPersonHeight = 0.45
         this.firstPersonForwardOffset = 0.1
 
-        this.thirdPersonOffset = new THREE.Vector3(0, 1.6, -5)
+        this.thirdPersonOffset = new THREE.Vector3(0, 1.2, -3.2)
         this._thirdPersonMin = this.orbitControl.minDistance
         this._thirdPersonMax = this.orbitControl.maxDistance
 
@@ -168,6 +168,10 @@ export class CharacterControls {
             let resolvedPos = candidatePos
             if (this.environment) {
                 resolvedPos = this.environment.resolveCollision(currentPos, candidatePos, this.playerRadius)
+                // If currently inside the fridge bounds, clamp to interior so the player can't pass through walls
+                if (this.environment.isInsideFridgeWorld && this.environment.isInsideFridgeWorld(currentPos)) {
+                    resolvedPos = this.environment.clampToFridgeInterior(resolvedPos, this.playerRadius)
+                }
             }
 
             moveX = resolvedPos.x - currentPos.x

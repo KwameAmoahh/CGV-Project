@@ -7,6 +7,8 @@ const AUDIO_ENABLED = false
 // Make the fridge very large relative to the player
 const FRIDGE_SCALE = 10
 
+const ENABLE_CAN_PHYSICS = true
+
 // Product placement disabled: keep the fridge empty
 const PRODUCT_CATALOG = []
 
@@ -37,6 +39,11 @@ export class Environment {
     this._productsLoaded = false
     this._onReadyCallbacks = []
     this._shelves = []
+    this._dynamicCans = []
+    this._playerRef = null
+    this._playerRadius = 0.12
+    this._eggsBox = null
+    this._eggsObject = null
 
     // Interactives
     this.doorMesh = null
@@ -68,10 +75,8 @@ export class Environment {
       this._audio = { started: false }
     }
 
-    // Cold ambient fog
-    if (!this.scene.fog) {
-      this.scene.fog = new THREE.FogExp2(0xa8def0, 0.03)
-    }
+    // Ensure no fog/mist in the scene
+    this.scene.fog = null
 
     // Load the fridge model (contains structure and props)
     this._loadFridge()
@@ -103,7 +108,7 @@ export class Environment {
 
   _loadFridge() {
     const loader = new GLTFLoader()
-    loader.load('assets/models/fridge.glb', (gltf) => {
+    loader.load('assets/models/full_kitchen.glb', (gltf) => {
       const root = gltf.scene
       // Scale up before building collision boxes so AABBs include scaling
       root.scale.set(FRIDGE_SCALE, FRIDGE_SCALE, FRIDGE_SCALE)
@@ -111,16 +116,42 @@ export class Environment {
 
       const shelfHeights = []
       const meshRecords = []
+
+      // Try to find the fridge sub-group inside the kitchen model
+      const fridgeCandidates = []
+      root.traverse((o) => {
+        const nm = (o.name || '').toLowerCase()
+        if (nm.includes('fridge') || nm.includes('refrigerator') || nm.includes('fridge_body') || nm.includes('fridge_interior')) {
+          const box = new THREE.Box3().setFromObject(o)
+          if (!box.isEmpty()) fridgeCandidates.push({ obj: o, vol: box.getSize(new THREE.Vector3()).x * box.getSize(new THREE.Vector3()).y * box.getSize(new THREE.Vector3()).z })
+        }
+      })
+      if (fridgeCandidates.length) {
+        fridgeCandidates.sort((a, b) => b.vol - a.vol)
+        this._fridgeGroup = fridgeCandidates[0].obj
+      } else {
+        this._fridgeGroup = root
+      }
+
+      const scanRoot = this._fridgeGroup || root
+
+      const HUMAN_HIDE_TAGS = ['human','character','person','people','man','woman','male','female','chef','worker','tpose','mixamo','armature']
       root.traverse((obj) => {
         if (obj.isMesh) {
           obj.castShadow = true
           obj.receiveShadow = true
+          const name = (obj.name || '').toLowerCase()
+          const isHuman = isNamedLike(name, HUMAN_HIDE_TAGS) || obj.isSkinnedMesh === true
+          if (isHuman) {
+            obj.visible = false
+            return
+          }
+
           this._allMeshes.push(obj)
 
           // Walkable raycast targets – default to all meshes
           this._walkableMeshes.push(obj)
 
-          const name = (obj.name || '').toLowerCase()
 
           // Surfaces
           if (isNamedLike(name, ['ice', 'butter', 'slipper'])) {
@@ -131,7 +162,7 @@ export class Environment {
           }
 
           // Interactives
-          if (!this.doorMesh && isNamedLike(name, ['door'])) {
+          if (!this.doorMesh && isNamedLike(name, ['door']) && this._isDescendantOf(obj, scanRoot)) {
             this.doorMesh = obj
             this._doorClosedRotationY = this.doorMesh.rotation.y
           }
@@ -141,19 +172,31 @@ export class Environment {
           }
 
           // Blockers – by default everything except tiny details
-          if (!isNamedLike(name, ['light', 'bulb', 'vent_fan'])) {
+          if (!isNamedLike(name, ['light', 'bulb', 'vent_fan', 'can', 'soda', 'human','character','person','people','man','woman','male','female','chef','worker','tpose','mixamo','armature'])) {
             const box = new THREE.Box3().setFromObject(obj)
             if (box.isEmpty() === false) this._blockingBoxes.push({ box, ref: obj })
           }
 
-          if (isNamedLike(name, ['shelf', 'tray', 'rack', 'drawer', 'floor'])) {
+          if (isNamedLike(name, ['shelf', 'tray', 'rack', 'drawer', 'floor']) && this._isDescendantOf(obj, scanRoot)) {
             const b = new THREE.Box3().setFromObject(obj)
             if (!b.isEmpty()) shelfHeights.push(b.max.y)
           }
 
           // Record mesh for shelf detection by geometry later
-          const bAll = new THREE.Box3().setFromObject(obj)
-          if (!bAll.isEmpty()) meshRecords.push({ obj, name, box: bAll.clone() })
+          if (this._isDescendantOf(obj, scanRoot)) {
+            const bAll = new THREE.Box3().setFromObject(obj)
+            if (!bAll.isEmpty()) meshRecords.push({ obj, name, box: bAll.clone() })
+            // Track eggs candidate
+            if (isNamedLike(name, ['egg', 'eggs'])) {
+              const vol = bAll.getSize(new THREE.Vector3())
+              const volume = vol.x * vol.y * vol.z
+              if (!this._eggsBox || volume > (this._eggsVolume || 0)) {
+                this._eggsBox = bAll.clone()
+                this._eggsObject = obj
+                this._eggsVolume = volume
+              }
+            }
+          }
         }
       })
 
@@ -161,7 +204,7 @@ export class Environment {
       this._scheduleFlicker(1.2)
 
       // Detect shelves by geometry/name and compute usable rectangles
-      const fridgeBox = new THREE.Box3().setFromObject(root)
+      const fridgeBox = new THREE.Box3().setFromObject(scanRoot)
       const fridgeSize = fridgeBox.getSize(new THREE.Vector3())
       const shelves = []
       for (const rec of meshRecords) {
@@ -188,6 +231,7 @@ export class Environment {
       this._shelves = shelves
 
       this._shelfHeights = (shelves.length ? shelves.map(s => s.y) : shelfHeights).sort((a, b) => a - b)
+      this._fridgeBounds = new THREE.Box3().setFromObject(scanRoot)
 
       // Simple onLoaded callback mechanism
       this.loaded = true
@@ -202,12 +246,23 @@ export class Environment {
       const done = this._populateProducts()
       Promise.resolve(done).then(() => {
         this._productsLoaded = true
+        if (ENABLE_CAN_PHYSICS) this._setupCanPhysics(root)
         this._emitReady()
       })
     }, undefined, (err) => {
       console.warn('Failed to load fridge.glb:', err)
       this.loaded = true
     })
+  }
+
+  _isDescendantOf(obj, root) {
+    if (!root) return false
+    let p = obj
+    while (p) {
+      if (p === root) return true
+      p = p.parent
+    }
+    return false
   }
 
   _scheduleFlicker(duration = 1.2) {
@@ -329,6 +384,10 @@ export class Environment {
       const angle = this._doorClosedRotationY + this._doorOpenSign * (Math.PI / 2) * this.doorOpenAmount
       this.doorMesh.rotation.y = angle
     }
+
+    if (ENABLE_CAN_PHYSICS && this._dynamicCans.length) {
+      this._stepCanPhysics(dt)
+    }
   }
 
   // Allow async notification if caller wants to wait for load
@@ -341,6 +400,157 @@ export class Environment {
   onReady(cb) {
     if (this.loaded && this._productsLoaded) cb(this)
     else this._onReadyCallbacks.push(cb)
+  }
+
+  setPlayerRef(object3D, radius = 0.12) {
+    this._playerRef = object3D
+    this._playerRadius = radius
+  }
+
+  isInsideFridgeWorld(point) {
+    if (!this._fridgeBounds) {
+      const scanRoot = this._fridgeGroup || this.group
+      this._fridgeBounds = new THREE.Box3().setFromObject(scanRoot)
+    }
+    return this._fridgeBounds.containsPoint(point)
+  }
+
+  clampToFridgeInterior(pos, radius = 0.12) {
+    if (!this._fridgeBounds) return pos
+    const clamped = pos.clone()
+    const m = Math.max(radius, 0.05)
+    clamped.x = THREE.MathUtils.clamp(clamped.x, this._fridgeBounds.min.x + m, this._fridgeBounds.max.x - m)
+    clamped.z = THREE.MathUtils.clamp(clamped.z, this._fridgeBounds.min.z + m, this._fridgeBounds.max.z - m)
+    return clamped
+  }
+
+  _setupCanPhysics(root) {
+    const candidates = []
+    root.traverse((obj) => {
+      if (obj.isMesh) {
+        const name = (obj.name || '').toLowerCase()
+        if (isNamedLike(name, ['can', 'soda'])) candidates.push(obj)
+      }
+    })
+    for (const mesh of candidates) {
+      this._makeDynamicCan(mesh)
+    }
+  }
+
+  _makeDynamicCan(mesh) {
+    const worldBox = new THREE.Box3().setFromObject(mesh)
+    const size = worldBox.getSize(new THREE.Vector3())
+    const radius = Math.max(0.01, Math.min(size.x, size.z) * 0.5)
+    const height = Math.max(0.02, size.y)
+    const center = new THREE.Vector3(
+      (worldBox.min.x + worldBox.max.x) * 0.5,
+      worldBox.min.y + radius,
+      (worldBox.min.z + worldBox.max.z) * 0.5
+    )
+
+    const worldPos = center.clone()
+    const worldQuat = new THREE.Quaternion()
+    mesh.getWorldQuaternion(worldQuat)
+
+    const pivot = new THREE.Object3D()
+    pivot.position.copy(worldPos)
+    pivot.quaternion.copy(worldQuat)
+    this.scene.updateMatrixWorld()
+    this.scene.add(pivot)
+    this.group.attach(pivot)
+
+    const clone = mesh.clone(true)
+    clone.position.set(0, 0, 0)
+    clone.rotation.set(0, 0, 0)
+    pivot.add(clone)
+
+    if (mesh.parent) mesh.parent.remove(mesh)
+
+    this._dynamicCans.push({
+      pivot,
+      mesh: clone,
+      radius,
+      height,
+      velocity: new THREE.Vector3(0, 0, 0),
+      mass: 1,
+      restitution: 0.25,
+      friction: 0.6
+    })
+  }
+
+  _stepCanPhysics(dt) {
+    const gravity = -9.8
+    const tmp = new THREE.Vector3()
+
+    for (const c of this._dynamicCans) {
+      c.velocity.y += gravity * dt
+
+      c.pivot.position.addScaledVector(c.velocity, dt)
+
+      // Collide with environment boxes
+      for (const b of this._blockingBoxes) {
+        const closest = new THREE.Vector3(
+          THREE.MathUtils.clamp(c.pivot.position.x, b.box.min.x, b.box.max.x),
+          THREE.MathUtils.clamp(c.pivot.position.y, b.box.min.y, b.box.max.y),
+          THREE.MathUtils.clamp(c.pivot.position.z, b.box.min.z, b.box.max.z)
+        )
+        const diff = tmp.copy(c.pivot.position).sub(closest)
+        const dist = diff.length()
+        if (dist < c.radius) {
+          const n = dist > 0.0001 ? diff.multiplyScalar(1 / dist) : new THREE.Vector3(0, 1, 0)
+          const penetration = c.radius - dist
+          c.pivot.position.addScaledVector(n, penetration + 1e-3)
+          const vDot = c.velocity.dot(n)
+          if (vDot < 0) {
+            c.velocity.addScaledVector(n, -(1 + c.restitution) * vDot)
+            // friction tangential
+            const vt = tmp.copy(c.velocity).addScaledVector(n, -c.velocity.dot(n))
+            c.velocity.addScaledVector(vt, -c.friction * dt)
+          }
+        }
+      }
+    }
+
+    // Can-can collisions (pairwise)
+    for (let i = 0; i < this._dynamicCans.length; i++) {
+      for (let j = i + 1; j < this._dynamicCans.length; j++) {
+        const a = this._dynamicCans[i]
+        const b = this._dynamicCans[j]
+        const delta = tmp.copy(b.pivot.position).sub(a.pivot.position)
+        const dist = delta.length()
+        const minDist = a.radius + b.radius
+        if (dist > 0 && dist < minDist) {
+          const n = delta.multiplyScalar(1 / dist)
+          const penetration = minDist - dist
+          a.pivot.position.addScaledVector(n, -penetration * 0.5)
+          b.pivot.position.addScaledVector(n, penetration * 0.5)
+          const va = a.velocity.dot(n)
+          const vb = b.velocity.dot(n)
+          const m1 = a.mass, m2 = b.mass
+          const newVa = (va * (m1 - m2) + 2 * m2 * vb) / (m1 + m2)
+          const newVb = (vb * (m2 - m1) + 2 * m1 * va) / (m1 + m2)
+          a.velocity.addScaledVector(n, newVa - va)
+          b.velocity.addScaledVector(n, newVb - vb)
+        }
+      }
+    }
+
+    // Player interactions
+    if (this._playerRef) {
+      const ppos = new THREE.Vector3()
+      this._playerRef.getWorldPosition(ppos)
+      for (const c of this._dynamicCans) {
+        const delta = tmp.copy(c.pivot.position).sub(ppos)
+        const dist = delta.length()
+        const minDist = this._playerRadius + c.radius
+        if (dist > 0 && dist < minDist) {
+          const n = delta.multiplyScalar(1 / dist)
+          const penetration = minDist - dist
+          c.pivot.position.addScaledVector(n, penetration + 1e-3)
+          c.velocity.addScaledVector(n, 2)
+        }
+      }
+    }
   }
 
   _emitReady() {
@@ -360,7 +570,8 @@ export class Environment {
     const fallback = new THREE.Vector3(0, 1, 0)
     if (!this.loaded) return fallback
 
-    const bbox = new THREE.Box3().setFromObject(this.group)
+    const scanRoot = this._fridgeGroup || this.group
+    const bbox = new THREE.Box3().setFromObject(scanRoot)
     const center = bbox.getCenter(new THREE.Vector3())
     const pos = center.clone()
 
@@ -382,6 +593,125 @@ export class Environment {
     const info = this.getGroundInfo(pos)
     if (info && typeof info.y === 'number') pos.y = info.y + 0.05
     return pos
+  }
+
+  getTopSideBottomShelfSpawn(radius = 0.12) {
+    if (!this._shelves || this._shelves.length === 0) return this.getSpawnPoint()
+    const shelves = this._shelves
+    const idx = shelves.length >= 2 ? shelves.length - 2 : shelves.length - 1
+    const shelf = shelves[idx]
+    const p = this._safePointOnShelf(shelf, radius)
+    return p || this.getSpawnPoint()
+  }
+
+  getTopShelfSpawn(radius = 0.12) {
+    const scanRoot = this._fridgeGroup || this.group
+    const fridgeBox = new THREE.Box3().setFromObject(scanRoot)
+    const size = fridgeBox.getSize(new THREE.Vector3())
+    const center = fridgeBox.getCenter(new THREE.Vector3())
+
+    if (!this._shelves || this._shelves.length === 0) {
+      // Place near top-center if no shelves were detected
+      return new THREE.Vector3(center.x, fridgeBox.min.y + size.y * 0.85, center.z)
+    }
+
+    const shelf = this._shelves[this._shelves.length - 1]
+    // If our "top shelf" is suspiciously low (likely we only detected the floor), force a high spawn
+    if (shelf.y < fridgeBox.min.y + size.y * 0.6) {
+      return new THREE.Vector3(center.x, fridgeBox.min.y + size.y * 0.85, center.z)
+    }
+
+    // Deterministic center-of-shelf spawn
+    const cx = (shelf.xMin + shelf.xMax) * 0.5
+    const cz = (shelf.zMin + shelf.zMax) * 0.5
+    return new THREE.Vector3(cx, shelf.y + 0.08, cz)
+  }
+
+  _safePointOnShelf(shelf, radius = 0.12) {
+    const tmp = new THREE.Vector3()
+    const collides = (p) => {
+      for (const b of this._blockingBoxes) {
+        const box = b.box
+        const y = shelf.y
+        const hit = (
+          p.x >= box.min.x - radius && p.x <= box.max.x + radius &&
+          p.z >= box.min.z - radius && p.z <= box.max.z + radius &&
+          y >= box.min.y - 0.5 && y <= box.max.y + 0.5
+        )
+        if (hit) return true
+      }
+      return false
+    }
+    for (let tries = 0; tries < 80; tries++) {
+      const x = THREE.MathUtils.lerp(shelf.xMin, shelf.xMax, Math.random())
+      const z = THREE.MathUtils.lerp(shelf.zMin, shelf.zMax, Math.random())
+      const from = new THREE.Vector3(x, shelf.y + 2, z)
+      this._ray.set(from, new THREE.Vector3(0, -1, 0))
+      const hits = this._ray.intersectObjects([shelf.obj], true)
+      if (hits && hits.length) {
+        const p = hits[0].point.clone()
+        if (!collides(p)) { p.y += 0.05; return p }
+      }
+    }
+    const cx = (shelf.xMin + shelf.xMax) * 0.5
+    const cz = (shelf.zMin + shelf.zMax) * 0.5
+    const from = new THREE.Vector3(cx, shelf.y + 2, cz)
+    this._ray.set(from, new THREE.Vector3(0, -1, 0))
+    const hits = this._ray.intersectObjects([shelf.obj], true)
+    if (hits && hits.length) { const p = hits[0].point.clone(); p.y += 0.05; return p }
+    return null
+  }
+
+  getEggsSpawnPoint(radius = 0.12) {
+    if (!this._eggsBox) return null
+    const center = this._eggsBox.getCenter(new THREE.Vector3())
+    const size = this._eggsBox.getSize(new THREE.Vector3())
+    const yTop = this._eggsBox.max.y + 1
+
+    // Try four directions around the eggs and place on first walkable hit
+    const candidates = [
+      new THREE.Vector3(this._eggsBox.max.x + radius + size.x * 0.25, yTop, center.z),
+      new THREE.Vector3(this._eggsBox.min.x - radius - size.x * 0.25, yTop, center.z),
+      new THREE.Vector3(center.x, yTop, this._eggsBox.max.z + radius + size.z * 0.25),
+      new THREE.Vector3(center.x, yTop, this._eggsBox.min.z - radius - size.z * 0.25)
+    ]
+
+    for (const from of candidates) {
+      this._ray.set(from, new THREE.Vector3(0, -1, 0))
+      const hits = this._ray.intersectObjects(this._walkableMeshes, true)
+      if (hits && hits.length) {
+        for (const h of hits) {
+          // Keep near egg height to avoid floor picks
+          if (h.point.y < this._eggsBox.min.y - 0.2) continue
+          const p = h.point.clone(); p.y += 0.05
+          // Ensure not colliding heavily with blockers
+          let collides = false
+          for (const b of this._blockingBoxes) {
+            const box = b.box
+            if (
+              p.x >= box.min.x - radius && p.x <= box.max.x + radius &&
+              p.z >= box.min.z - radius && p.z <= box.max.z + radius &&
+              p.y >= box.min.y - 0.5 && p.y <= box.max.y + 0.5
+            ) { collides = true; break }
+          }
+          if (!collides) return p
+        }
+      }
+    }
+
+    // As a fallback, snap to closest shelf by height near eggs
+    if (this._shelves && this._shelves.length) {
+      let best = Infinity, shelf = null
+      for (const s of this._shelves) {
+        const d = Math.abs(s.y - this._eggsBox.min.y)
+        if (d < best) { best = d; shelf = s }
+      }
+      if (shelf) {
+        const sp = this._safePointOnShelf(shelf, radius)
+        if (sp) return sp
+      }
+    }
+    return null
   }
   _populateProducts() {
     try {
