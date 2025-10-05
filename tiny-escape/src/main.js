@@ -1,5 +1,6 @@
 import { KeyDisplay } from './utils.js'
 import { CharacterControls } from './CharacterControls.js'
+import { Environment } from './environment.js'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -39,11 +40,16 @@ orbitControls.update()
 addLights()
 addFloor()
 
+// ENVIRONMENT (Fridge + props + FX)
+const environment = new Environment(scene)
+
 // MODEL + ANIMATIONS
 let characterControls
 new GLTFLoader().load('assets/models/lastone.glb', (gltf) => {
     const model = gltf.scene
     model.traverse((obj) => { if (obj.isMesh) obj.castShadow = true })
+    // Shrink player for fridge scale
+    model.scale.set(0.18, 0.18, 0.18)
     scene.add(model)
 
     const mixer = new THREE.AnimationMixer(model)
@@ -59,6 +65,24 @@ new GLTFLoader().load('assets/models/lastone.glb', (gltf) => {
 
     // Start with lowercase "idle"
     characterControls = new CharacterControls(model, mixer, animationsMap, orbitControls, camera, 'idle')
+    characterControls.setEnvironment(environment)
+
+    // Spawn inside fridge once products are also placed to avoid overlap
+    const placeInside = () => {
+        const spawn = environment.getSpawnPoint ? environment.getSpawnPoint() : null
+        if (spawn) {
+            model.position.copy(spawn)
+            // Reposition camera behind the shrunken player
+            if (characterControls) {
+                const desiredCam = characterControls.getThirdPersonCameraPos()
+                camera.position.copy(desiredCam)
+                characterControls.updateCameraTarget(0, 0)
+                orbitControls.update()
+            }
+        }
+    }
+    if (environment.onReady) environment.onReady(placeInside)
+    else placeInside()
 })
 
 // CONTROL KEYS
@@ -73,6 +97,16 @@ document.addEventListener('keydown', (event) => {
         characterControls.toggleCameraMode()
     } else if ((event.code === 'Space' || event.key === ' ') && characterControls) {
         characterControls.jump()
+    } else if (event.key.toLowerCase() === 'r' && characterControls) {
+        // Respawn to a safe spot inside the fridge if stuck
+        const spawn = (environment.getSafeSpawnPoint && environment.getSafeSpawnPoint()) || (environment.getSpawnPoint && environment.getSpawnPoint())
+        if (spawn) {
+            characterControls.model.position.copy(spawn)
+            const desiredCam = characterControls.getThirdPersonCameraPos()
+            camera.position.copy(desiredCam)
+            characterControls.updateCameraTarget(0, 0)
+            orbitControls.update()
+        }
     } else {
         keysPressed[event.key.toLowerCase()] = true
     }
@@ -87,7 +121,14 @@ document.addEventListener('keyup', (event) => {
 const clock = new THREE.Clock()
 function animate() {
     let delta = clock.getDelta()
-    if (characterControls) characterControls.update(delta, keysPressed)
+    if (characterControls) {
+        characterControls.update(delta, keysPressed)
+        // Check goal button
+        if (environment.isAtExitButton && environment.isAtExitButton(characterControls.model.position)) {
+            environment.openDoor()
+        }
+    }
+    environment.update(delta)
     // Only update OrbitControls in third-person; FPS manages camera itself
     if (!characterControls || characterControls.cameraMode === 'third') {
         orbitControls.update()
@@ -107,10 +148,12 @@ window.addEventListener('resize', () => {
 
 // FLOOR
 function addFloor() {
-    const geometry = new THREE.PlaneGeometry(100, 100)
+    // Keep an infinite ground far below in case environment is missing
+    const geometry = new THREE.PlaneGeometry(200, 200)
     const material = new THREE.MeshStandardMaterial({ color: 0x555555 })
     const floor = new THREE.Mesh(geometry, material)
     floor.rotation.x = -Math.PI / 2
+    floor.position.y = -10
     floor.receiveShadow = true
     scene.add(floor)
 }
