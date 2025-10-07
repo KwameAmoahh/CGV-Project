@@ -152,6 +152,11 @@ export class Environment {
           // Walkable raycast targets – default to all meshes
           this._walkableMeshes.push(obj)
 
+          // MONARE
+          // const isProblemObject = isNamedLike(name, ['egg', 'eggs']);
+          // if (!isProblemObject) {
+          //   this._walkableMeshes.push(obj);
+          // }
 
           // Surfaces
           if (isNamedLike(name, ['ice', 'butter', 'slipper'])) {
