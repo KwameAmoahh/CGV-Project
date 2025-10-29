@@ -8,21 +8,24 @@ import { KeyDisplay } from './utils.js'
 // Scene + Camera
 // ----------------------------------------------------------------------------- //
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(0x17171f)
+scene.background = new THREE.Color(0x87ceeb) // sky blue
 
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.05, 400)
 camera.position.set(0, 3.0, 4.5)
 
 const renderer = new THREE.WebGLRenderer({ antialias: true })
 renderer.shadowMap.enabled = true
+renderer.shadowMap.type = THREE.PCFSoftShadowMap
 renderer.setPixelRatio(window.devicePixelRatio)
 renderer.setSize(window.innerWidth, window.innerHeight)
 document.body.appendChild(renderer.domElement)
 
+// No HDRI environment/background; keep simple background color
+
 // Minimap camera (top-down)
 const minimapCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 2000)
 minimapCamera.up.set(0, 0, -1)
-let minimapEnabled = true
+let minimapEnabled = false
 let minimapSize = 220 // pixels
 let minimapMargin = 12
 
@@ -36,6 +39,7 @@ controls.update()
 // ----------------------------------------------------------------------------- //
 // Lighting
 // ----------------------------------------------------------------------------- //
+// Softer ambient like before
 scene.add(new THREE.AmbientLight(0xffffff, 0.5))
 
 const keyLight = new THREE.DirectionalLight(0xffffff, 0.9)
@@ -53,6 +57,16 @@ const ground = new THREE.Mesh(new THREE.PlaneGeometry(150, 150), groundMat)
 ground.rotation.x = -Math.PI / 2
 ground.receiveShadow = true
 scene.add(ground)
+
+// ----------------------------------------------------------------------------- //
+// Simple Outdoor Environment (sky dome + large ground) + Sun shadow light
+// ----------------------------------------------------------------------------- //
+function buildOutside() {
+  // Remove any previous outdoor objects and keep a clean sky-blue background
+  const old = scene.getObjectByName('OutdoorGroup')
+  if (old) scene.remove(old)
+  scene.background = new THREE.Color(0x87ceeb) // sky blue
+}
 
 // ----------------------------------------------------------------------------- //
 // Animation / Navigation
@@ -235,23 +249,12 @@ window.addEventListener('blur', () => {
   }
 })
 
-const spatulaPromise = new Promise((resolve) => {
-  const url = 'assets/models/spatula_spongebob.glb'
-  loader.load(
-    url,
-    (gltf) => resolve(gltf.scene),
-    undefined,
-    (err) => {
-      console.error('GLTF load failed:', url, err)
-      resolve(new THREE.Object3D())
-    }
-  )
-})
+const spatulaPromise = Promise.resolve(new THREE.Object3D())
 
 const KITCHEN_SCALE = 0.12
 const kitchenReady = new Promise((resolve) => {
   loader.load(
-    'assets/models/kitchen2.glb',
+    'assets/models/kitchen.glb',
     (gltf) => {
       const kitchenRoot = gltf.scene
       kitchenRoot.scale.setScalar(KITCHEN_SCALE)
@@ -272,9 +275,9 @@ const kitchenReady = new Promise((resolve) => {
       scene.add(kitchenRoot)
       kitchenRootRef = kitchenRoot
 
-      const box = new THREE.Box3().setFromObject(kitchenRoot)
-      const size = box.getSize(new THREE.Vector3())
-      const height = size.y
+  const box = new THREE.Box3().setFromObject(kitchenRoot)
+  const size = box.getSize(new THREE.Vector3())
+  const height = size.y
 
       const focusY = Math.max(1.8, height * 0.22)
       const camHeight = Math.max(2.8, height * 0.42)
@@ -316,6 +319,8 @@ const kitchenReady = new Promise((resolve) => {
       debugLogLocations('kitchen-loaded')
 
       resolve(kitchenInfo)
+      // Build simple outdoor env once kitchen floor is known
+      buildOutside()
     },
     undefined,
     (error) => {
