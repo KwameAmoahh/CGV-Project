@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
+import { CharacterControls } from './CharacterControls.js'
+import { KeyDisplay } from './utils.js'
 
 // ----------------------------------------------------------------------------- //
 // Scene + Camera
@@ -16,6 +18,13 @@ renderer.shadowMap.enabled = true
 renderer.setPixelRatio(window.devicePixelRatio)
 renderer.setSize(window.innerWidth, window.innerHeight)
 document.body.appendChild(renderer.domElement)
+
+// Minimap camera (top-down)
+const minimapCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 2000)
+minimapCamera.up.set(0, 0, -1)
+let minimapEnabled = true
+let minimapSize = 220 // pixels
+let minimapMargin = 12
 
 const controls = new OrbitControls(camera, renderer.domElement)
 controls.target.set(0, 1.6, 0)
@@ -40,7 +49,7 @@ rimLight.position.set(-4, 4, -3)
 scene.add(rimLight)
 
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a2a33 })
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), groundMat)
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(150, 150), groundMat)
 ground.rotation.x = -Math.PI / 2
 ground.receiveShadow = true
 scene.add(ground)
@@ -51,10 +60,105 @@ scene.add(ground)
 const loader = new GLTFLoader()
 const clock = new THREE.Clock()
 
-let mixer = null
+let chefMixer = null
 let chefRoot = null
 let activeAction = null
 let baseY = 0
+let chefFloorY = 0
+
+let playerMixer = null
+let playerControls = null
+let playerModel = null
+
+const keysPressed = {}
+const keyDisplay = new KeyDisplay()
+
+let kitchenInfo = null
+let kitchenRootRef = null
+const spawnRay = new THREE.Raycaster()
+
+function debugLogLocations(tag = '') {
+  const label = tag ? ` ${tag}` : ''
+  try {
+    if (kitchenInfo) {
+      const k = kitchenInfo
+      const innerW = (k.innerHalfWidth ?? k.halfWidth ?? 0) * 2
+      const innerD = (k.innerHalfDepth ?? k.halfDepth ?? 0) * 2
+      console.log(
+        `[KITCHEN${label}] center=(${k.center.x.toFixed(2)}, ${k.center.y.toFixed(2)}, ${k.center.z.toFixed(2)}), floorY=${k.floorY.toFixed(2)}, innerSize≈(${innerW.toFixed(2)} x ${innerD.toFixed(2)})`
+      )
+    } else {
+      console.log(`[KITCHEN${label}] not ready`)
+    }
+    if (typeof chefRoot !== 'undefined' && chefRoot) {
+      const c = chefRoot.position
+      console.log(
+        `[CHEF${label}] pos=(${c.x.toFixed(2)}, ${c.y.toFixed(2)}, ${c.z.toFixed(2)})`
+      )
+    } else {
+      console.log(`[CHEF${label}] not spawned`)
+    }
+    if (playerModel) {
+      const p = playerModel.position
+      console.log(
+        `[PLAYER${label}] pos=(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)})`
+      )
+    } else {
+      console.log(`[PLAYER${label}] not spawned`)
+    }
+  } catch (e) {
+    console.warn('debugLogLocations failed:', e)
+  }
+}
+
+// Pick a floor point inside the kitchen bounds using a downward raycast
+function pickInteriorPoint(preferNegativeZ = true) {
+  if (!kitchenInfo || !kitchenRootRef) return null
+  const iw = Math.max(2, kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6)
+  const id = Math.max(2, kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6)
+  const startY = kitchenInfo.floorY + (kitchenInfo.height || 8) + 2
+  const dirDown = new THREE.Vector3(0, -1, 0)
+
+  const samples = []
+  if (preferNegativeZ) {
+    // Favor deeper positions (negative Z) away from the front wall
+    const steps = [
+      [0.0, -0.30], [0.25, -0.30], [-0.25, -0.30],
+      [0.0, -0.55], [0.35, -0.55], [-0.35, -0.55],
+      [0.0, -0.80]
+    ]
+    for (const [nx, nz] of steps) {
+      const x = THREE.MathUtils.clamp(nx * iw, -iw + 0.6, iw - 0.6)
+      const z = THREE.MathUtils.clamp(nz * id, -id + 0.6, id - 0.6)
+      samples.push([x, z])
+    }
+  } else {
+    const x = THREE.MathUtils.clamp(0, -iw + 0.6, iw - 0.6)
+    const z = THREE.MathUtils.clamp(0, -id + 0.6, id - 0.6)
+    samples.push([x, z])
+  }
+
+  for (const [sx, sz] of samples) {
+    spawnRay.set(new THREE.Vector3(sx, startY, sz), dirDown)
+    const hits = spawnRay.intersectObject(kitchenRootRef, true)
+    if (hits && hits.length) {
+      const hit = hits[hits.length - 1] // lowest along ray
+      const y = Math.max(kitchenInfo.floorY, hit.point.y)
+      return new THREE.Vector3(sx, y, sz)
+    }
+  }
+  return null
+}
+
+// Sample kitchen floor height at a given X/Z
+function groundYAt(x, z) {
+  if (!kitchenRootRef || !kitchenInfo) return 0
+  const startY = kitchenInfo.floorY + (kitchenInfo.height || 8) + 2
+  spawnRay.set(new THREE.Vector3(x, startY, z), new THREE.Vector3(0, -1, 0))
+  const hits = spawnRay.intersectObject(kitchenRootRef, true)
+  if (hits && hits.length) return Math.max(kitchenInfo.floorY, hits[hits.length - 1].point.y)
+  return kitchenInfo.floorY
+}
 
 const actions = {
   walk: null,
@@ -99,12 +203,52 @@ const BEHAVIOR_SEQUENCE = [
 const tempVecA = new THREE.Vector3()
 const tempVecB = new THREE.Vector3()
 
+document.addEventListener('keydown', (event) => {
+  const key = event.key.toLowerCase()
+  keyDisplay.down(event.key)
+  keysPressed[key] = true
 
-const spatulaPromise = new Promise((resolve) => {
-  loader.load('assets/models/spatula_spongebob.glb', (gltf) => resolve(gltf.scene))
+  if (key === 'shift') {
+    if (!event.repeat) playerControls?.switchRunToggle()
+  } else if (key === 'c') {
+    playerControls?.toggleCameraMode()
+  } else if (key === 'l') {
+    debugLogLocations('key-L')
+  } else if (key === 'm') {
+    minimapEnabled = !minimapEnabled
+  } else if (key === ' ' || event.code === 'Space') {
+    event.preventDefault()
+    playerControls?.jump()
+  }
 })
 
-const KITCHEN_SCALE = 0.08
+document.addEventListener('keyup', (event) => {
+  const key = event.key.toLowerCase()
+  keyDisplay.up(event.key)
+  keysPressed[key] = false
+})
+
+window.addEventListener('blur', () => {
+  for (const key of Object.keys(keysPressed)) {
+    if (keysPressed[key]) keyDisplay.up(key)
+    keysPressed[key] = false
+  }
+})
+
+const spatulaPromise = new Promise((resolve) => {
+  const url = 'assets/models/spatula_spongebob.glb'
+  loader.load(
+    url,
+    (gltf) => resolve(gltf.scene),
+    undefined,
+    (err) => {
+      console.error('GLTF load failed:', url, err)
+      resolve(new THREE.Object3D())
+    }
+  )
+})
+
+const KITCHEN_SCALE = 0.12
 const kitchenReady = new Promise((resolve) => {
   loader.load(
     'assets/models/kitchen2.glb',
@@ -126,34 +270,52 @@ const kitchenReady = new Promise((resolve) => {
       // Center the kitchen around the origin and drop the floor to y ~ 0
       kitchenRoot.position.set(-center.x, -min.y, -center.z)
       scene.add(kitchenRoot)
+      kitchenRootRef = kitchenRoot
 
       const box = new THREE.Box3().setFromObject(kitchenRoot)
       const size = box.getSize(new THREE.Vector3())
       const height = size.y
 
-      const focusY = Math.max(1.6, height * 0.2)
-      const camHeight = Math.max(2.2, height * 0.35)
-      const halfWidth = Math.max(5, size.x * 0.36)
-      const halfDepth = Math.max(6.5, size.z * 0.32)
+      const focusY = Math.max(1.8, height * 0.22)
+      const camHeight = Math.max(2.8, height * 0.42)
+      const halfWidth = Math.max(8, size.x * 0.45)
+      const halfDepth = Math.max(10, size.z * 0.4)
 
-      const interiorZ = Math.max(2.0, halfDepth * 0.18)
-      controls.target.set(0, focusY, interiorZ * 0.15)
+      const interiorZ = Math.max(3.2, halfDepth * 0.22)
+      controls.target.set(0, focusY, interiorZ * 0.25)
 
-      camera.position.set(0, camHeight, -interiorZ)
+      camera.position.set(0, camHeight, -interiorZ * 0.55)
       controls.update()
 
-      const marginX = Math.min(halfWidth * 0.35, 2.5)
-      const marginZ = Math.min(halfDepth * 0.35, 3)
+      const marginX = Math.min(halfWidth * 0.25, 4)
+      const marginZ = Math.min(halfDepth * 0.25, 4.5)
+
+      const innerHalfWidth = Math.max(halfWidth - marginX, 2.5)
+      const innerHalfDepth = Math.max(halfDepth - marginZ, 3.2)
 
       PATH_POINTS.length = 0
       PATH_POINTS.push(
-        new THREE.Vector3(-halfWidth + marginX, 0, halfDepth - marginZ),
-        new THREE.Vector3(halfWidth - marginX, 0, halfDepth - marginZ),
-        new THREE.Vector3(halfWidth - marginX, 0, -halfDepth + marginZ),
-        new THREE.Vector3(-halfWidth + marginX, 0, -halfDepth + marginZ)
+        new THREE.Vector3(-innerHalfWidth, 0, innerHalfDepth),
+        new THREE.Vector3(innerHalfWidth, 0, innerHalfDepth),
+        new THREE.Vector3(innerHalfWidth, 0, -innerHalfDepth),
+        new THREE.Vector3(-innerHalfWidth, 0, -innerHalfDepth)
       )
 
-      resolve({ box, halfWidth, halfDepth })
+      const centerWorld = box.getCenter(new THREE.Vector3())
+      kitchenInfo = {
+        box,
+        halfWidth,
+        halfDepth,
+        innerHalfWidth,
+        innerHalfDepth,
+        height,
+        floorY: box.min.y,
+        center: centerWorld,
+      }
+
+      debugLogLocations('kitchen-loaded')
+
+      resolve(kitchenInfo)
     },
     undefined,
     (error) => {
@@ -161,6 +323,180 @@ const kitchenReady = new Promise((resolve) => {
       resolve(null)
     }
   )
+})
+
+function makeKitchenEnvironment() {
+  return {
+    getGroundInfo(pos, maxDistance = 8) {
+      if (!kitchenRootRef) return { y: 0, surface: null }
+      const from = new THREE.Vector3(pos.x, pos.y + 2, pos.z)
+      spawnRay.set(from, new THREE.Vector3(0, -1, 0))
+      const hits = spawnRay.intersectObject(kitchenRootRef, true)
+      for (let i = 0; i < hits.length; i++) {
+        const h = hits[i]
+        const dy = from.y - h.point.y
+        if (dy >= 0 && dy <= (maxDistance + 2)) {
+          return { y: h.point.y, surface: null }
+        }
+      }
+      return { y: 0, surface: null }
+    },
+    resolveCollision(current, desired, radius = 0.12) {
+      if (!kitchenInfo) return desired.clone()
+      const iw = (kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6) - radius
+      const id = (kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6) - radius
+      const out = desired.clone()
+      out.x = THREE.MathUtils.clamp(out.x, -iw, iw)
+      out.z = THREE.MathUtils.clamp(out.z, -id, id)
+      return out
+    },
+    isInsideFridgeWorld(p) {
+      if (!kitchenInfo) return true
+      const iw = kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6
+      const id = kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6
+      return (p.x >= -iw && p.x <= iw && p.z >= -id && p.z <= id)
+    },
+    clampToFridgeInterior(pos, radius = 0.12) {
+      if (!kitchenInfo) return pos
+      const iw = (kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6) - radius
+      const id = (kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6) - radius
+      const out = pos.clone()
+      out.x = THREE.MathUtils.clamp(out.x, -iw, iw)
+      out.z = THREE.MathUtils.clamp(out.z, -id, id)
+      return out
+    },
+    getSurfaceAt() { return null },
+  }
+}
+
+const PLAYER_SCALE = 0.45
+const CHEF_SCALE = 5.0
+const CHEF_IDLE_ONLY = true
+loader.load('assets/models/player.glb', async (gltf) => {
+  const kitchen = await kitchenReady
+
+  playerModel = gltf.scene
+  playerModel.scale.setScalar(PLAYER_SCALE)
+  playerModel.traverse((child) => {
+    if (child.isMesh) {
+      child.castShadow = true
+      child.receiveShadow = true
+      if (child.material && child.material.map) child.material.map.anisotropy = 8
+    }
+  })
+
+  const playerBox = new THREE.Box3().setFromObject(playerModel)
+  const baseOffset = -playerBox.min.y
+
+  function pickInteriorSpawn() {
+    if (!kitchenInfo || !kitchenRootRef) return null
+    const iw = Math.max(2, kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6)
+    const id = Math.max(2, kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6)
+    const startY = kitchenInfo.floorY + kitchenInfo.height + 2
+    const dirDown = new THREE.Vector3(0, -1, 0)
+    const samples = []
+    // Bias toward negative Z (deeper inside) so we don't land outside the front wall
+    const steps = [
+      [0.0, -0.30],
+      [0.25, -0.30], [-0.25, -0.30],
+      [0.0, -0.55], [0.35, -0.55], [-0.35, -0.55],
+      [0.0, -0.80]
+    ]
+    for (const [nx, nz] of steps) {
+      const x = THREE.MathUtils.clamp(nx * iw, -iw + 0.6, iw - 0.6)
+      const z = THREE.MathUtils.clamp(nz * id, -id + 0.6, id - 0.6)
+      samples.push([x, z])
+    }
+    for (const [sx, sz] of samples) {
+      spawnRay.set(new THREE.Vector3(sx, startY, sz), dirDown)
+      const hits = spawnRay.intersectObject(kitchenRootRef, true)
+      if (hits && hits.length) {
+        // choose the closest hit from above (roof/floor), then clamp to floor
+        const hit = hits[0]
+        const y = Math.max(kitchenInfo.floorY, hit.point.y)
+        return new THREE.Vector3(sx, y, sz)
+      }
+    }
+    return null
+  }
+
+  let spawn = new THREE.Vector3(0, baseOffset + 0.02, 0)
+  const inside = pickInteriorSpawn()
+  if (inside) {
+    spawn = inside
+    spawn.y += baseOffset + 0.02
+  } else if (kitchen) {
+    const innerDepth = kitchen.innerHalfDepth ?? kitchen.halfDepth ?? 6
+    spawn.x = 0
+    // Push to negative Z so we start inside the room rather than in front of windows
+    spawn.z = -Math.max(1.0, innerDepth - 1.0)
+    spawn.y = kitchen.floorY + baseOffset + 0.02
+  }
+
+  playerModel.position.copy(spawn)
+  if (kitchen) {
+    playerModel.lookAt(new THREE.Vector3(0, playerModel.position.y, kitchen.halfDepth || 10))
+  }
+  scene.add(playerModel)
+
+  debugLogLocations('player-spawn')
+
+  playerMixer = new THREE.AnimationMixer(playerModel)
+  const animationsMap = new Map()
+  let defaultAction = null
+
+  gltf.animations.forEach((clip) => {
+    const lower = clip.name.toLowerCase()
+    const action = playerMixer.clipAction(clip)
+
+    if (!defaultAction) defaultAction = lower
+
+    animationsMap.set(clip.name, action)
+    animationsMap.set(lower, action)
+
+    if (lower.includes('idle')) animationsMap.set('idle', action)
+    if (lower.includes('walk')) animationsMap.set('walk', action)
+    if (lower.includes('run')) animationsMap.set('run', action)
+    if (lower.includes('jump')) animationsMap.set('jump', action)
+  })
+
+  if (!animationsMap.has('idle') && defaultAction) {
+    animationsMap.set('idle', animationsMap.get(defaultAction))
+  }
+  if (!animationsMap.has('walk') && animationsMap.has('run')) {
+    animationsMap.set('walk', animationsMap.get('run'))
+  }
+
+  ;['idle', 'walk', 'run'].forEach((name) => {
+    const action = animationsMap.get(name)
+    if (action) {
+      action.setLoop(THREE.LoopRepeat, Infinity)
+      action.clampWhenFinished = false
+    }
+  })
+
+  const startAction = animationsMap.has('idle') ? 'idle' : defaultAction || 'idle'
+  playerControls = new CharacterControls(
+    playerModel,
+    playerMixer,
+    animationsMap,
+    controls,
+    camera,
+    startAction
+  )
+
+  if (playerControls) {
+    // Attach simple environment so gravity/ground and walls behave inside the kitchen
+    playerControls.setEnvironment(makeKitchenEnvironment())
+    playerControls.toggleRun = false
+    const camPos = playerControls.getThirdPersonCameraPos()
+    camera.position.copy(camPos)
+    playerControls.updateCameraTarget(0, 0)
+    controls.target.copy(playerControls.cameraTarget)
+    controls.update()
+  }
+}, undefined, (err) => {
+  console.error('GLTF load failed: assets/models/player.glb', err)
 })
 
 loader.load('assets/models/chef2.glb', async (gltf) => {
@@ -174,7 +510,7 @@ loader.load('assets/models/chef2.glb', async (gltf) => {
   }
 
   chefRoot = gltf.scene
-  chefRoot.scale.setScalar(0.45)
+  chefRoot.scale.setScalar(CHEF_SCALE)
   chefRoot.traverse((child) => {
     if (child.isMesh) {
       child.castShadow = true
@@ -199,10 +535,10 @@ loader.load('assets/models/chef2.glb', async (gltf) => {
   else scene.add(spatula)
 
   // Mixer + clips -------------------------------------------------------------
-  mixer = new THREE.AnimationMixer(chefRoot)
+  chefMixer = new THREE.AnimationMixer(chefRoot)
   gltf.animations.forEach((clip) => {
     const lower = clip.name.toLowerCase()
-    const action = mixer.clipAction(clip)
+    const action = chefMixer.clipAction(clip)
     if (!actions.fallback) actions.fallback = action
     if (lower.includes('low_crawl')) actions.crawl = action
     else if (lower.includes('crouch_to_stand')) actions.crouchToStand = action
@@ -223,17 +559,31 @@ loader.load('assets/models/chef2.glb', async (gltf) => {
   // Lock the feet to sit on the ground plane
   const bound = new THREE.Box3().setFromObject(chefRoot)
   const FOOT_LOCK_EPS = 0.02
-  baseY = -bound.min.y - FOOT_LOCK_EPS
+  baseY = -bound.min.y + FOOT_LOCK_EPS
 
-  const start = PATH_POINTS[0] ?? new THREE.Vector3()
-  chefRoot.position.set(start.x, baseY, start.z)
+  // Spawn chef at a valid interior floor position
+  let chefSpawn = pickInteriorPoint(true)
+  if (!chefSpawn && kitchenInfo) {
+    chefSpawn = new THREE.Vector3(0, kitchenInfo.floorY, -((kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6) * 0.5))
+  }
+  const start = chefSpawn ?? PATH_POINTS[0] ?? new THREE.Vector3()
+  chefFloorY = start.y ?? kitchenInfo?.floorY ?? 0
+  chefRoot.position.set(start.x, chefFloorY + baseY, start.z)
   chefRoot.rotation.set(0, ORIENTATION_OFFSET, 0)
   scene.add(chefRoot)
+  console.log(`[CHEF spawn] pos=(${chefRoot.position.x.toFixed(2)}, ${(chefRoot.position.y).toFixed(2)}, ${chefRoot.position.z.toFixed(2)})`)
 
-  waypointIndex = 0
-  behaviorIndex = 0
-  currentBehavior = null
-  beginBehavior(0)
+  if (typeof CHEF_IDLE_ONLY !== 'undefined' && CHEF_IDLE_ONLY) {
+    const idleAction = actions.idle || actions.lookBack || actions.fallback
+    playAction(idleAction)
+  } else {
+    waypointIndex = 0
+    behaviorIndex = 0
+    currentBehavior = null
+    beginBehavior(0)
+  }
+}, undefined, (err) => {
+  console.error('GLTF load failed: assets/models/chef2.glb', err)
 })
 
 function playAction(action) {
@@ -380,15 +730,16 @@ function moveTowardsWaypoint(delta, targetIndex, speed) {
 
   const travel = speed * delta
   if (distance <= travel) {
-    chefRoot.position.set(target.x, baseY, target.z)
+    const gy = groundYAt(target.x, target.z)
+    chefRoot.position.set(target.x, gy + baseY, target.z)
     orientTowards(tempVecB)
-    chefRoot.position.y = baseY
     return true
   }
 
   tempVecB.normalize()
-  chefRoot.position.addScaledVector(tempVecB, travel)
-  chefRoot.position.y = baseY
+  const nextPos = chefRoot.position.clone().addScaledVector(tempVecB, travel)
+  const gy = groundYAt(nextPos.x, nextPos.z)
+  chefRoot.position.set(nextPos.x, gy + baseY, nextPos.z)
   orientTowards(tempVecB)
   return false
 }
@@ -407,12 +758,36 @@ function animate() {
   requestAnimationFrame(animate)
   const delta = clock.getDelta()
 
-  if (mixer) mixer.update(delta)
+  if (chefMixer) chefMixer.update(delta)
+  if (playerControls) playerControls.update(delta, keysPressed)
 
-  updateBehavior(delta)
+  if (!CHEF_IDLE_ONLY) updateBehavior(delta)
 
   controls.update()
   renderer.render(scene, camera)
+
+  // Minimap overlay
+  if (minimapEnabled) {
+    const focus = (playerModel && playerModel.position) || (chefRoot && chefRoot.position)
+    if (focus) {
+      const mapHeight = 35
+      minimapCamera.position.set(focus.x, (focus.y || 0) + mapHeight, focus.z)
+      minimapCamera.lookAt(focus.x, (focus.y || 0), focus.z)
+    }
+    renderer.clearDepth()
+    renderer.setScissorTest(true)
+    const w = minimapSize
+    const h = minimapSize
+    const x = window.innerWidth - w - minimapMargin
+    const y = minimapMargin
+    renderer.setViewport(x, y, w, h)
+    renderer.setScissor(x, y, w, h)
+    minimapCamera.aspect = 1
+    minimapCamera.updateProjectionMatrix()
+    renderer.render(scene, minimapCamera)
+    renderer.setScissorTest(false)
+    renderer.setViewport(0, 0, window.innerWidth, window.innerHeight)
+  }
 }
 
 animate()
@@ -424,4 +799,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight
   camera.updateProjectionMatrix()
   renderer.setSize(window.innerWidth, window.innerHeight)
+  keyDisplay.updatePosition()
+  minimapCamera.aspect = 1
+  minimapCamera.updateProjectionMatrix()
 })
