@@ -8,8 +8,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x17171f)
 
-const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100)
-camera.position.set(0, 2.2, 6)
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.05, 400)
+camera.position.set(0, 3.0, 4.5)
 
 const renderer = new THREE.WebGLRenderer({ antialias: true })
 renderer.shadowMap.enabled = true
@@ -18,10 +18,10 @@ renderer.setSize(window.innerWidth, window.innerHeight)
 document.body.appendChild(renderer.domElement)
 
 const controls = new OrbitControls(camera, renderer.domElement)
-controls.target.set(0, 1.5, 0)
+controls.target.set(0, 1.6, 0)
 controls.enableDamping = true
-controls.minDistance = 1.5
-controls.maxDistance = 8
+controls.minDistance = 0.5
+controls.maxDistance = 80
 controls.update()
 
 // ----------------------------------------------------------------------------- //
@@ -40,7 +40,7 @@ rimLight.position.set(-4, 4, -3)
 scene.add(rimLight)
 
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a2a33 })
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), groundMat)
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), groundMat)
 ground.rotation.x = -Math.PI / 2
 ground.receiveShadow = true
 scene.add(ground)
@@ -67,10 +67,10 @@ const actions = {
   fallback: null,
 }
 
-// Simple back-and-forth path so the chef runs up/down the screen
+// Waypoints the chef visits (updated once the kitchen model loads)
 const PATH_POINTS = [
-  new THREE.Vector3(0, 0, 2.4),
-  new THREE.Vector3(0, 0, -2.4),
+  new THREE.Vector3(3.5, 0, 3.5),
+  new THREE.Vector3(-3.5, 0, 3.5),
 ]
 
 const WALK_SPEED = 1.35
@@ -84,14 +84,16 @@ let behaviorIndex = 0
 let currentBehavior = null
 
 const BEHAVIOR_SEQUENCE = [
-  { type: 'idle', duration: 2.4 },
+  { type: 'idle', duration: 2.5 },
   { type: 'crouchDown' },
   { type: 'crawl', target: 1, speed: CRAWL_SPEED },
   { type: 'standUp' },
+  { type: 'idle', duration: 1.6 },
+  { type: 'slowRun', target: 2, speed: SLOW_RUN_SPEED },
+  { type: 'idle', duration: 1.5 },
+  { type: 'walk', target: 3, speed: WALK_SPEED },
   { type: 'idle', duration: 1.8 },
   { type: 'slowRun', target: 0, speed: SLOW_RUN_SPEED },
-  { type: 'idle', duration: 1.4 },
-  { type: 'walk', target: 1, speed: WALK_SPEED },
 ]
 
 const tempVecA = new THREE.Vector3()
@@ -102,7 +104,75 @@ const spatulaPromise = new Promise((resolve) => {
   loader.load('assets/models/spatula_spongebob.glb', (gltf) => resolve(gltf.scene))
 })
 
+const KITCHEN_SCALE = 0.08
+const kitchenReady = new Promise((resolve) => {
+  loader.load(
+    'assets/models/kitchen2.glb',
+    (gltf) => {
+      const kitchenRoot = gltf.scene
+      kitchenRoot.scale.setScalar(KITCHEN_SCALE)
+
+      kitchenRoot.traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true
+          child.receiveShadow = true
+        }
+      })
+
+      const preBox = new THREE.Box3().setFromObject(kitchenRoot)
+      const center = preBox.getCenter(new THREE.Vector3())
+      const min = preBox.min.clone()
+
+      // Center the kitchen around the origin and drop the floor to y ~ 0
+      kitchenRoot.position.set(-center.x, -min.y, -center.z)
+      scene.add(kitchenRoot)
+
+      const box = new THREE.Box3().setFromObject(kitchenRoot)
+      const size = box.getSize(new THREE.Vector3())
+      const height = size.y
+
+      const focusY = Math.max(1.6, height * 0.2)
+      const camHeight = Math.max(2.2, height * 0.35)
+      const halfWidth = Math.max(5, size.x * 0.36)
+      const halfDepth = Math.max(6.5, size.z * 0.32)
+
+      const interiorZ = Math.max(2.0, halfDepth * 0.18)
+      controls.target.set(0, focusY, interiorZ * 0.15)
+
+      camera.position.set(0, camHeight, -interiorZ)
+      controls.update()
+
+      const marginX = Math.min(halfWidth * 0.35, 2.5)
+      const marginZ = Math.min(halfDepth * 0.35, 3)
+
+      PATH_POINTS.length = 0
+      PATH_POINTS.push(
+        new THREE.Vector3(-halfWidth + marginX, 0, halfDepth - marginZ),
+        new THREE.Vector3(halfWidth - marginX, 0, halfDepth - marginZ),
+        new THREE.Vector3(halfWidth - marginX, 0, -halfDepth + marginZ),
+        new THREE.Vector3(-halfWidth + marginX, 0, -halfDepth + marginZ)
+      )
+
+      resolve({ box, halfWidth, halfDepth })
+    },
+    undefined,
+    (error) => {
+      console.error('Failed to load kitchen2.glb', error)
+      resolve(null)
+    }
+  )
+})
+
 loader.load('assets/models/chef2.glb', async (gltf) => {
+  await kitchenReady
+  if (PATH_POINTS.length < 2) {
+    PATH_POINTS.length = 0
+    PATH_POINTS.push(
+      new THREE.Vector3(0, 0, 2.4),
+      new THREE.Vector3(0, 0, -2.4)
+    )
+  }
+
   chefRoot = gltf.scene
   chefRoot.scale.setScalar(0.45)
   chefRoot.traverse((child) => {
@@ -160,6 +230,9 @@ loader.load('assets/models/chef2.glb', async (gltf) => {
   chefRoot.rotation.set(0, ORIENTATION_OFFSET, 0)
   scene.add(chefRoot)
 
+  waypointIndex = 0
+  behaviorIndex = 0
+  currentBehavior = null
   beginBehavior(0)
 })
 
@@ -195,6 +268,15 @@ function beginBehavior(index) {
     targetIndex: config.target ?? null,
     speed: config.speed ?? null,
     moving: config.type === 'crawl' || config.type === 'walk' || config.type === 'slowRun',
+  }
+
+  if (
+    typeof currentBehavior.targetIndex === 'number' &&
+    PATH_POINTS.length > 0
+  ) {
+    const len = PATH_POINTS.length
+    currentBehavior.targetIndex =
+      ((currentBehavior.targetIndex % len) + len) % len
   }
 
   switch (config.type) {
@@ -281,8 +363,10 @@ function updateBehavior(delta) {
 }
 
 function moveTowardsWaypoint(delta, targetIndex, speed) {
-  if (!PATH_POINTS[targetIndex]) return true
-  const target = PATH_POINTS[targetIndex]
+  const len = PATH_POINTS.length
+  if (len === 0) return true
+  const safeIndex = ((targetIndex % len) + len) % len
+  const target = PATH_POINTS[safeIndex]
   tempVecA.copy(target).sub(chefRoot.position)
   tempVecB.set(tempVecA.x, 0, tempVecA.z)
   const distance = tempVecB.length()
