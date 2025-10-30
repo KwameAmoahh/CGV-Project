@@ -15,7 +15,8 @@ camera.position.set(0, 3.0, 4.5)
 
 const renderer = new THREE.WebGLRenderer({ antialias: true })
 renderer.shadowMap.enabled = true
-renderer.shadowMap.type = THREE.PCFSoftShadowMap
+// Sharper, more contrasted shadows
+renderer.shadowMap.type = THREE.PCFShadowMap
 renderer.setPixelRatio(window.devicePixelRatio)
 renderer.setSize(window.innerWidth, window.innerHeight)
 document.body.appendChild(renderer.domElement)
@@ -39,17 +40,40 @@ controls.update()
 // ----------------------------------------------------------------------------- //
 // Lighting
 // ----------------------------------------------------------------------------- //
-// Softer ambient like before
-scene.add(new THREE.AmbientLight(0xffffff, 0.5))
+// Slightly dimmer ambient so shadows read darker
+scene.add(new THREE.AmbientLight(0xffffff, 0.35))
 
 const keyLight = new THREE.DirectionalLight(0xffffff, 0.9)
 keyLight.position.set(3, 6, 4)
 keyLight.castShadow = true
-keyLight.shadow.mapSize.set(2048, 2048)
+// Sharper, cleaner soft shadows
+keyLight.shadow.mapSize.set(4096, 4096)
+// Fit shadow camera to the room so we avoid acne/peter‑panning
+const SHADOW_EXTENT = 30
+keyLight.shadow.camera.left = -SHADOW_EXTENT
+keyLight.shadow.camera.right = SHADOW_EXTENT
+keyLight.shadow.camera.top = SHADOW_EXTENT
+keyLight.shadow.camera.bottom = -SHADOW_EXTENT
+keyLight.shadow.camera.near = 0.1
+keyLight.shadow.camera.far = 100
+keyLight.shadow.bias = -0.00025
+keyLight.shadow.normalBias = 0.02
+keyLight.shadow.camera.updateProjectionMatrix()
 scene.add(keyLight)
 
-const rimLight = new THREE.DirectionalLight(0xffffff, 0.4)
+const rimLight = new THREE.DirectionalLight(0xffffff, 0.35)
 rimLight.position.set(-4, 4, -3)
+rimLight.castShadow = true
+rimLight.shadow.mapSize.set(2048, 2048)
+rimLight.shadow.camera.left = -SHADOW_EXTENT
+rimLight.shadow.camera.right = SHADOW_EXTENT
+rimLight.shadow.camera.top = SHADOW_EXTENT
+rimLight.shadow.camera.bottom = -SHADOW_EXTENT
+rimLight.shadow.camera.near = 0.1
+rimLight.shadow.camera.far = 100
+rimLight.shadow.bias = -0.0002
+rimLight.shadow.normalBias = 0.015
+rimLight.shadow.camera.updateProjectionMatrix()
 scene.add(rimLight)
 
 const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a2a33 })
@@ -90,13 +114,20 @@ const keyDisplay = new KeyDisplay()
 let kitchenInfo = null
 let kitchenRootRef = null
 const spawnRay = new THREE.Raycaster()
+// Feature flag: keep object-AABB collisions OFF to avoid movement glitches
+// Turn on only when testing: set to true and refresh.
+const USE_OBJECT_COLLIDERS = false
 // Visible mesh list used for collisions (only meshes that are actually visible)
 const collidableMeshList = []
 const DEBUG_COLLISION_HELPERS = false
+// Wall thickness used for simple perimeter collision (meters)
+const WALL_THICKNESS = 0.18
 let kitchenColliders = [] // { box: THREE.Box3, name: string }
 let colliderHelpers = []
 let highlightHelpers = []
 let debugCollidersVisible = false
+// Shadow: indoor spot to guarantee shadows inside the room
+let roomLight = null
 
 function debugLogLocations(tag = '') {
   const label = tag ? ` ${tag}` : ''
@@ -265,7 +296,7 @@ const spatulaPromise = Promise.resolve(new THREE.Object3D())
 const KITCHEN_SCALE = 0.12
 const kitchenReady = new Promise((resolve) => {
   loader.load(
-    'assets/models/kitchen.glb',
+    '/assets/models/kitchen.glb',
     (gltf) => {
       const kitchenRoot = gltf.scene
       kitchenRoot.scale.setScalar(KITCHEN_SCALE)
@@ -340,10 +371,63 @@ const kitchenReady = new Promise((resolve) => {
       buildOutside()
       // Build world colliders for furniture/walls so free spaces remain walkable
       if (USE_OBJECT_COLLIDERS) buildKitchenColliders()
+
+      // Tune indoor shadows to tightly fit the kitchen bounds
+      try {
+        const ext = Math.max(size.x, size.z) * 0.6
+        // Main light
+        keyLight.target.position.copy(centerWorld)
+        keyLight.shadow.camera.left = -ext
+        keyLight.shadow.camera.right = ext
+        keyLight.shadow.camera.top = ext
+        keyLight.shadow.camera.bottom = -ext
+        keyLight.shadow.camera.near = 0.1
+        keyLight.shadow.camera.far = Math.max(100, size.y * 3)
+        // Place the light so it looks into the room
+        keyLight.position.set(centerWorld.x + ext, centerWorld.y + size.y * 0.8, centerWorld.z + ext * 0.6)
+        keyLight.shadow.camera.updateProjectionMatrix()
+        scene.add(keyLight.target)
+
+        // Fill/rim light
+        rimLight.target.position.copy(centerWorld)
+        rimLight.shadow.camera.left = -ext
+        rimLight.shadow.camera.right = ext
+        rimLight.shadow.camera.top = ext
+        rimLight.shadow.camera.bottom = -ext
+        rimLight.shadow.camera.near = 0.1
+        rimLight.shadow.camera.far = Math.max(80, size.y * 2.5)
+        rimLight.position.set(centerWorld.x - ext * 0.7, centerWorld.y + size.y * 0.6, centerWorld.z - ext * 0.7)
+        rimLight.shadow.camera.updateProjectionMatrix()
+        scene.add(rimLight.target)
+
+        // Add a dedicated indoor spotlight directly above the room to force player/furniture shadows
+        if (roomLight) {
+          scene.remove(roomLight)
+          scene.remove(roomLight.target)
+          roomLight.dispose?.()
+        }
+        // Stronger, slightly tighter spotlight for vivid indoor shadows
+        roomLight = new THREE.SpotLight(0xffffff, 1.6)
+        roomLight.name = 'RoomSpot'
+        roomLight.position.set(centerWorld.x, centerWorld.y + size.y * 0.95, centerWorld.z)
+        roomLight.castShadow = true
+        roomLight.angle = Math.PI / 4
+        roomLight.penumbra = 0.2
+        roomLight.decay = 1
+        roomLight.distance = Math.max(size.x, size.z) * 2
+        roomLight.shadow.mapSize.set(4096, 4096)
+        roomLight.shadow.bias = -0.0002
+        roomLight.shadow.normalBias = 0.02
+        roomLight.shadow.camera.near = 0.1
+        roomLight.shadow.camera.far = Math.max(120, size.y * 3)
+        roomLight.target.position.copy(centerWorld)
+        scene.add(roomLight)
+        scene.add(roomLight.target)
+      } catch (e) { /* no-op */ }
     },
     undefined,
     (error) => {
-      console.error('Failed to load kitchen2.glb', error)
+      console.error('GLTF load failed: /assets/models/kitchen.glb', error)
       resolve(null)
     }
   )
@@ -369,12 +453,16 @@ function makeKitchenEnvironment() {
     },
     resolveCollision(current, desired, radius = 0.12) {
       if (!kitchenInfo) return desired.clone()
-      // Revert to stable interior clamp only to avoid teleports
-      const iw = (kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6) - radius
-      const id = (kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6) - radius
+      // Clamp to the actual kitchen world box with a wall thickness margin
+      const bx = kitchenInfo.box
+      const margin = WALL_THICKNESS
+      const minX = bx.min.x + margin
+      const maxX = bx.max.x - margin
+      const minZ = bx.min.z + margin
+      const maxZ = bx.max.z - margin
       const out = desired.clone()
-      out.x = THREE.MathUtils.clamp(out.x, -iw, iw)
-      out.z = THREE.MathUtils.clamp(out.z, -id, id)
+      out.x = THREE.MathUtils.clamp(out.x, minX, maxX)
+      out.z = THREE.MathUtils.clamp(out.z, minZ, maxZ)
       return out
     },
     isInsideFridgeWorld(p) {
@@ -385,11 +473,16 @@ function makeKitchenEnvironment() {
     },
     clampToFridgeInterior(pos, radius = 0.12) {
       if (!kitchenInfo) return pos
-      const iw = (kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6) - radius
-      const id = (kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6) - radius
+      // Use same wall thickness margin as resolveCollision
+      const bx = kitchenInfo.box
+      const margin = WALL_THICKNESS
+      const minX = bx.min.x + margin
+      const maxX = bx.max.x - margin
+      const minZ = bx.min.z + margin
+      const maxZ = bx.max.z - margin
       const out = pos.clone()
-      out.x = THREE.MathUtils.clamp(out.x, -iw, iw)
-      out.z = THREE.MathUtils.clamp(out.z, -id, id)
+      out.x = THREE.MathUtils.clamp(out.x, minX, maxX)
+      out.z = THREE.MathUtils.clamp(out.z, minZ, maxZ)
       return out
     },
     getSurfaceAt() { return null },
@@ -566,6 +659,7 @@ loader.load('assets/models/player.glb', async (gltf) => {
     if (lower.includes('walk')) animationsMap.set('walk', action)
     if (lower.includes('run')) animationsMap.set('run', action)
     if (lower.includes('jump')) animationsMap.set('jump', action)
+    if (lower.includes('climb')) animationsMap.set('climb', action)
   })
 
   if (!animationsMap.has('idle') && defaultAction) {

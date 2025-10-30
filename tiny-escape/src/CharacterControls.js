@@ -39,6 +39,25 @@ export class CharacterControls {
         this._thirdPersonMin = this.orbitControl.minDistance
         this._thirdPersonMax = this.orbitControl.maxDistance
 
+        // Climb system
+        this.isClimbing = false
+        this._climbTimer = 0
+        this._climbDuration = 0
+        this._climbStart = new THREE.Vector3()
+        this._climbEnd = new THREE.Vector3()
+        this._raycaster = new THREE.Raycaster()
+        this.climbConfig = {
+            enabled: true,
+            approachDistance: 0.7,  // forward ray length
+            minLedge: 0.25,         // min climb height
+            maxLedge: 1.2,          // max climb height
+            upProbe: 1.4,           // how high to probe down from
+            forwardProbe: 0.22,     // how far forward we probe onto the top
+            onTopForward: 0.32,     // shift forward when ending on top
+            cooldown: 0.5           // prevent re-trigger spam
+        }
+        this._climbCooldown = 0
+
         // First-person rig (yaw -> pitch -> camera holder)
         this.fpsYaw = new THREE.Object3D()
         this.fpsPitch = new THREE.Object3D()
@@ -75,6 +94,29 @@ export class CharacterControls {
     }
 
     update(delta, keysPressed) {
+        // Handle ongoing climb
+        if (this.isClimbing) {
+            this._climbTimer += delta
+            const t = Math.min(1, this._climbTimer / Math.max(0.001, this._climbDuration))
+            this.model.position.lerpVectors(this._climbStart, this._climbEnd, t)
+            this.updateCameraTarget(0, 0)
+            if (t >= 1) {
+                this.isClimbing = false
+                this.isOnGround = true
+                this.velocityY = 0
+                // return to idle after climb finishes
+                const idle = this.animationsMap.get('idle')
+                if (idle) {
+                    const current = this.animationsMap.get(this.currentAction)
+                    if (current) current.fadeOut(this.fadeDuration)
+                    idle.reset().fadeIn(this.fadeDuration).play()
+                    this.currentAction = 'idle'
+                }
+                this._climbCooldown = this.climbConfig.cooldown
+            }
+            return
+        }
+        if (this._climbCooldown > 0) this._climbCooldown -= delta
         const directionPressed = DIRECTIONS.some((key) => keysPressed[key] === true)
 
         let desiredAction = ''
@@ -208,6 +250,69 @@ export class CharacterControls {
 
         // Update camera / rig to follow
         this.updateCameraTarget(moveX, moveZ)
+
+        // Attempt climb when pressing just 'e' (no forward required)
+        if (this.climbConfig.enabled && this._climbCooldown <= 0 && keysPressed['e']) {
+            this._attemptClimb(false)
+        }
+    }
+
+    _attemptClimb(requireForward = true) {
+        if (this.isClimbing) return
+        if (requireForward === true && !this.orbitControl) {}
+        // Raycast forward from chest
+        const origin = this.model.position.clone()
+        origin.y += 0.6
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.model.quaternion).normalize()
+        this._raycaster.set(origin, forward)
+        this._raycaster.far = this.climbConfig.approachDistance
+        const meshes = (this.environment && (this.environment._walkableMeshes || [])) || []
+        const hits = this._raycaster.intersectObjects(meshes, true)
+        if (!hits || !hits.length) return
+        const hit = hits[0]
+
+        // Probe down from above the ledge to find top
+        const topProbe = hit.point.clone()
+        // move a bit forward onto the surface so the down ray hits the tabletop, not the vertical face/leg
+        topProbe.addScaledVector(forward, this.climbConfig.forwardProbe)
+        topProbe.addScaledVector(new THREE.Vector3(0, 1, 0), this.climbConfig.upProbe)
+        this._raycaster.set(topProbe, new THREE.Vector3(0, -1, 0))
+        this._raycaster.far = this.climbConfig.upProbe + 2
+        const downHits = this._raycaster.intersectObjects(meshes, true)
+        if (!downHits || !downHits.length) return
+        const topHit = downHits[0]
+
+        const ledgeHeight = topHit.point.y - this.model.position.y
+        if (ledgeHeight < this.climbConfig.minLedge || ledgeHeight > this.climbConfig.maxLedge) return
+        // Do not treat floor as a ledge: require top to be meaningfully above current ground
+        let groundY = 0
+        if (this.environment && this.environment.getGroundInfo) {
+            const gi = this.environment.getGroundInfo(this.model.position)
+            if (gi && typeof gi.y === 'number') groundY = gi.y
+        }
+        if ((topHit.point.y - groundY) < this.climbConfig.minLedge * 0.8) return
+
+        // Start climb: set animation and target position on top
+        const climb = this.animationsMap.get('climb') || this.animationsMap.get('Climb')
+        if (climb) {
+            const current = this.animationsMap.get(this.currentAction)
+            if (current) current.fadeOut(this.fadeDuration)
+            climb.reset().setLoop(THREE.LoopOnce, 1)
+            climb.clampWhenFinished = true
+            climb.fadeIn(this.fadeDuration).play()
+            this.currentAction = 'climb'
+            this.isClimbing = true
+            this._climbTimer = 0
+            this._climbDuration = climb.getClip().duration || 1
+            this._climbStart.copy(this.model.position)
+            this._climbEnd.copy(topHit.point)
+            // move a bit onto the surface
+            this._climbEnd.addScaledVector(forward, this.climbConfig.onTopForward)
+            // keep y slightly above to avoid z-fighting
+            this._climbEnd.y += 0.02
+            this.velocityY = 0
+            this.isOnGround = false
+        }
     }
 
     updateCameraTarget(moveX, moveZ) {
