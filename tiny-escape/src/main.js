@@ -90,6 +90,13 @@ const keyDisplay = new KeyDisplay()
 let kitchenInfo = null
 let kitchenRootRef = null
 const spawnRay = new THREE.Raycaster()
+// Visible mesh list used for collisions (only meshes that are actually visible)
+const collidableMeshList = []
+const DEBUG_COLLISION_HELPERS = false
+let kitchenColliders = [] // { box: THREE.Box3, name: string }
+let colliderHelpers = []
+let highlightHelpers = []
+let debugCollidersVisible = false
 
 function debugLogLocations(tag = '') {
   const label = tag ? ` ${tag}` : ''
@@ -230,6 +237,10 @@ document.addEventListener('keydown', (event) => {
     debugLogLocations('key-L')
   } else if (key === 'm') {
     minimapEnabled = !minimapEnabled
+  } else if (key === 'v') {
+    debugCollidersVisible = !debugCollidersVisible
+    if (debugCollidersVisible) drawColliderHelpers()
+    else clearColliderHelpers()
   } else if (key === ' ' || event.code === 'Space') {
     event.preventDefault()
     playerControls?.jump()
@@ -260,9 +271,15 @@ const kitchenReady = new Promise((resolve) => {
       kitchenRoot.scale.setScalar(KITCHEN_SCALE)
 
       kitchenRoot.traverse((child) => {
-        if (child.isMesh) {
-          child.castShadow = true
-          child.receiveShadow = true
+        if (!child.isMesh) return
+        child.castShadow = true
+        child.receiveShadow = true
+        if (USE_OBJECT_COLLIDERS && child.visible) {
+          collidableMeshList.push(child)
+          if (DEBUG_COLLISION_HELPERS) {
+            const bh = new THREE.BoxHelper(child, 0xff0000)
+            scene.add(bh)
+          }
         }
       })
 
@@ -321,6 +338,8 @@ const kitchenReady = new Promise((resolve) => {
       resolve(kitchenInfo)
       // Build simple outdoor env once kitchen floor is known
       buildOutside()
+      // Build world colliders for furniture/walls so free spaces remain walkable
+      if (USE_OBJECT_COLLIDERS) buildKitchenColliders()
     },
     undefined,
     (error) => {
@@ -332,6 +351,8 @@ const kitchenReady = new Promise((resolve) => {
 
 function makeKitchenEnvironment() {
   return {
+    // call after kitchen loads
+    _rebuildColliders() { buildKitchenColliders() },
     getGroundInfo(pos, maxDistance = 8) {
       if (!kitchenRootRef) return { y: 0, surface: null }
       const from = new THREE.Vector3(pos.x, pos.y + 2, pos.z)
@@ -348,6 +369,7 @@ function makeKitchenEnvironment() {
     },
     resolveCollision(current, desired, radius = 0.12) {
       if (!kitchenInfo) return desired.clone()
+      // Revert to stable interior clamp only to avoid teleports
       const iw = (kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6) - radius
       const id = (kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6) - radius
       const out = desired.clone()
@@ -371,6 +393,87 @@ function makeKitchenEnvironment() {
       return out
     },
     getSurfaceAt() { return null },
+  }
+}
+
+function buildKitchenColliders() {
+  kitchenColliders = []
+  if (!kitchenRootRef || !kitchenInfo) return
+  const tempBox = new THREE.Box3()
+  const minHeightAsObstacle = Math.max(0.06, kitchenInfo.height * 0.015)
+  kitchenRootRef.updateMatrixWorld(true)
+  // Build only from visible meshes we registered
+  for (const obj of collidableMeshList) {
+    tempBox.setFromObject(obj)
+    if (tempBox.isEmpty()) continue
+    const sz = tempBox.getSize(new THREE.Vector3())
+    const lname = (obj.name || '').toLowerCase()
+    const skipByName = ['floor','tile','tiles','base','kick','plinth','trim','molding','moulding','skirting','sill']
+      .some(k => lname.includes(k))
+    const area = sz.x * sz.z
+    const isTiny = area < 0.08 || sz.y < minHeightAsObstacle
+    const closeToFloor = (tempBox.min.y - kitchenInfo.floorY) < 0.05 && sz.y < 0.25
+    if (skipByName || isTiny || closeToFloor) continue
+    const inflate = 0.02
+    const box = tempBox.clone()
+    box.min.x -= inflate; box.min.z -= inflate
+    box.max.x += inflate; box.max.z += inflate
+    kitchenColliders.push({ box, name: obj.name || '(unnamed mesh)' })
+  }
+  if (debugCollidersVisible) drawColliderHelpers()
+}
+
+function clearColliderHelpers() {
+  if (colliderHelpers.length) {
+    for (const h of colliderHelpers) scene.remove(h)
+    colliderHelpers.length = 0
+  }
+  if (highlightHelpers.length) {
+    for (const h of highlightHelpers) scene.remove(h)
+    highlightHelpers.length = 0
+  }
+}
+
+function drawColliderHelpers() {
+  clearColliderHelpers()
+  if (!kitchenColliders.length) return
+  for (const c of kitchenColliders) {
+    const helper = new THREE.Box3Helper(c.box || c, 0xff9800)
+    helper.name = 'ColliderHelper'
+    scene.add(helper)
+    colliderHelpers.push(helper)
+  }
+}
+
+function probeCollidersHere(radius = 0.6) {
+  if (!playerModel || !kitchenColliders.length) {
+    console.log('[probe] no player or no colliders')
+    return
+  }
+  // clear previous highlights
+  for (const h of highlightHelpers) scene.remove(h)
+  highlightHelpers.length = 0
+  const p = playerModel.position
+  const hits = []
+  for (const c of kitchenColliders) {
+    const b = c.box || c
+    const inside = (p.x > b.min.x - radius && p.x < b.max.x + radius &&
+                    p.z > b.min.z - radius && p.z < b.max.z + radius)
+    if (inside) {
+      hits.push(c)
+      const hh = new THREE.Box3Helper(b, 0xff0000)
+      scene.add(hh)
+      highlightHelpers.push(hh)
+    }
+  }
+  if (hits.length) {
+    console.log(`[probe] ${hits.length} collider(s) near player:`)
+    hits.forEach((c,i)=>{
+      const b=c.box||c
+      console.log(`  #${i+1} name=${c.name||'(none)'} min=(${b.min.x.toFixed(2)},${b.min.y.toFixed(2)},${b.min.z.toFixed(2)}) max=(${b.max.x.toFixed(2)},${b.max.y.toFixed(2)},${b.max.z.toFixed(2)})`)
+    })
+  } else {
+    console.log('[probe] no collider near player within', radius)
   }
 }
 
