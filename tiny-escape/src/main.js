@@ -204,11 +204,7 @@ function pickInteriorPoint(preferNegativeZ = true) {
 
 // Sample kitchen floor height at a given X/Z
 function groundYAt(x, z) {
-  if (!kitchenRootRef || !kitchenInfo) return 0
-  const startY = kitchenInfo.floorY + (kitchenInfo.height || 8) + 2
-  spawnRay.set(new THREE.Vector3(x, startY, z), new THREE.Vector3(0, -1, 0))
-  const hits = spawnRay.intersectObject(kitchenRootRef, true)
-  if (hits && hits.length) return Math.max(kitchenInfo.floorY, hits[hits.length - 1].point.y)
+  if (!kitchenInfo) return 0
   return kitchenInfo.floorY
 }
 
@@ -360,7 +356,7 @@ const kitchenReady = new Promise((resolve) => {
         innerHalfWidth,
         innerHalfDepth,
         height,
-        floorY: box.min.y,
+        floorY: kitchenRoot.position.y + box.min.y,
         center: centerWorld,
       }
 
@@ -435,8 +431,10 @@ const kitchenReady = new Promise((resolve) => {
 
 function makeKitchenEnvironment() {
   return {
-    // call after kitchen loads
+    // Rebuild colliders after loading new kitchen meshes
     _rebuildColliders() { buildKitchenColliders() },
+
+    // Get ground height beneath a position
     getGroundInfo(pos, maxDistance = 8) {
       if (!kitchenRootRef) return { y: 0, surface: null }
       const from = new THREE.Vector3(pos.x, pos.y + 2, pos.z)
@@ -451,43 +449,99 @@ function makeKitchenEnvironment() {
       }
       return { y: 0, surface: null }
     },
+
+    // -------------------------------------------------------------------------
+    // COLLISION SYSTEM — AABB-based
+    // -------------------------------------------------------------------------
     resolveCollision(current, desired, radius = 0.12) {
       if (!kitchenInfo) return desired.clone()
-      // Clamp to the actual kitchen world box with a wall thickness margin
+
+      // If no mesh colliders available, just clamp to room
+      if (!kitchenColliders.length) {
+        const bx = kitchenInfo.box
+        const margin = WALL_THICKNESS
+        const out = desired.clone()
+        out.x = THREE.MathUtils.clamp(out.x, bx.min.x + margin, bx.max.x - margin)
+        out.z = THREE.MathUtils.clamp(out.z, bx.min.z + margin, bx.max.z - margin)
+        return out
+      }
+
+      const out = desired.clone()
+
+      // Player bounding box (rough capsule approximation)
+      const playerHeight = 1.6
+      const playerBox = new THREE.Box3(
+        new THREE.Vector3(out.x - radius, kitchenInfo.floorY, out.z - radius),
+        new THREE.Vector3(out.x + radius, kitchenInfo.floorY + playerHeight, out.z + radius)
+      )
+
+      let collided = false
+
+      // Loop over all furniture / wall colliders
+      for (const c of kitchenColliders) {
+        const box = c.box
+        if (!box) continue
+        if (playerBox.intersectsBox(box)) {
+          collided = true
+
+          // Compute overlap in X and Z
+          const overlapX = Math.min(box.max.x - playerBox.min.x, playerBox.max.x - box.min.x)
+          const overlapZ = Math.min(box.max.z - playerBox.min.z, playerBox.max.z - box.min.z)
+
+          // Push out along smallest overlap axis
+          if (overlapX < overlapZ) {
+            if (playerBox.min.x < box.min.x) out.x -= overlapX
+            else out.x += overlapX
+          } else {
+            if (playerBox.min.z < box.min.z) out.z -= overlapZ
+            else out.z += overlapZ
+          }
+
+          // Update playerBox after push to prevent double penetration
+          playerBox.min.set(out.x - radius, kitchenInfo.floorY, out.z - radius)
+          playerBox.max.set(out.x + radius, kitchenInfo.floorY + playerHeight, out.z + radius)
+        }
+      }
+
+      // Clamp to outer kitchen walls (safety margin)
       const bx = kitchenInfo.box
       const margin = WALL_THICKNESS
-      const minX = bx.min.x + margin
-      const maxX = bx.max.x - margin
-      const minZ = bx.min.z + margin
-      const maxZ = bx.max.z - margin
-      const out = desired.clone()
-      out.x = THREE.MathUtils.clamp(out.x, minX, maxX)
-      out.z = THREE.MathUtils.clamp(out.z, minZ, maxZ)
+      out.x = THREE.MathUtils.clamp(out.x, bx.min.x + margin, bx.max.x - margin)
+      out.z = THREE.MathUtils.clamp(out.z, bx.min.z + margin, bx.max.z - margin)
+
+      if (collided) {
+        // Optional: visualize collision in debug mode
+        if (DEBUG_COLLISION_HELPERS) {
+          console.log(`[Collision] Adjusted player to (${out.x.toFixed(2)}, ${out.z.toFixed(2)})`)
+        }
+      }
+
       return out
     },
+
+    // Check if player inside the kitchen bounds
     isInsideFridgeWorld(p) {
       if (!kitchenInfo) return true
       const iw = kitchenInfo.innerHalfWidth ?? kitchenInfo.halfWidth ?? 6
       const id = kitchenInfo.innerHalfDepth ?? kitchenInfo.halfDepth ?? 6
       return (p.x >= -iw && p.x <= iw && p.z >= -id && p.z <= id)
     },
+
+    // Clamp to fridge interior (used for interior scenes)
     clampToFridgeInterior(pos, radius = 0.12) {
       if (!kitchenInfo) return pos
-      // Use same wall thickness margin as resolveCollision
       const bx = kitchenInfo.box
       const margin = WALL_THICKNESS
-      const minX = bx.min.x + margin
-      const maxX = bx.max.x - margin
-      const minZ = bx.min.z + margin
-      const maxZ = bx.max.z - margin
       const out = pos.clone()
-      out.x = THREE.MathUtils.clamp(out.x, minX, maxX)
-      out.z = THREE.MathUtils.clamp(out.z, minZ, maxZ)
+      out.x = THREE.MathUtils.clamp(out.x, bx.min.x + margin, bx.max.x - margin)
+      out.z = THREE.MathUtils.clamp(out.z, bx.min.z + margin, bx.max.z - margin)
       return out
     },
+
     getSurfaceAt() { return null },
   }
 }
+
 
 function buildKitchenColliders() {
   kitchenColliders = []
@@ -512,7 +566,52 @@ function buildKitchenColliders() {
     box.min.x -= inflate; box.min.z -= inflate
     box.max.x += inflate; box.max.z += inflate
     kitchenColliders.push({ box, name: obj.name || '(unnamed mesh)' })
+    if (DEBUG_COLLISION_HELPERS) {
+      console.log(
+        `[COLLIDER] mesh="${obj.name}" min=(${box.min.x.toFixed(2)},${box.min.y.toFixed(2)},${box.min.z.toFixed(2)}) max=(${box.max.x.toFixed(2)},${box.max.y.toFixed(2)},${box.max.z.toFixed(2)})`
+      )
+    }
   }
+
+  if (kitchenInfo && kitchenInfo.box) {
+    const perimeter = kitchenInfo.box
+    const wallHeight = Math.max(2.4, kitchenInfo.height ?? 3)
+    const floorY = kitchenInfo.floorY
+    const thickness = 0.08
+
+    const addPerimeterBox = (minX, maxX, minZ, maxZ, label) => {
+      const box = new THREE.Box3(
+        new THREE.Vector3(minX, floorY, minZ),
+        new THREE.Vector3(maxX, floorY + wallHeight, maxZ)
+      )
+      kitchenColliders.push({ box, name: `Perimeter:${label}` })
+      if (DEBUG_COLLISION_HELPERS) {
+        console.log(
+          `[COLLIDER perimeter-${label}] min=(${box.min.x.toFixed(2)},${box.min.y.toFixed(2)},${box.min.z.toFixed(2)}) max=(${box.max.x.toFixed(2)},${box.max.y.toFixed(2)},${box.max.z.toFixed(2)})`
+        )
+      }
+    }
+
+    const northInset = 0.6
+    addPerimeterBox(perimeter.min.x - thickness, perimeter.max.x + thickness, perimeter.min.z - thickness, perimeter.min.z + northInset, 'north')
+    addPerimeterBox(perimeter.min.x - thickness, perimeter.max.x + thickness, perimeter.max.z - northInset, perimeter.max.z + thickness, 'south')
+    addPerimeterBox(perimeter.min.x - thickness, perimeter.min.x + thickness, perimeter.min.z - thickness, perimeter.max.z + thickness, 'west')
+    addPerimeterBox(perimeter.max.x - thickness, perimeter.max.x + thickness, perimeter.min.z - thickness, perimeter.max.z + thickness, 'east')
+
+    const eastInset = 0.04
+    const eastThickness = 0.2
+    const eastBox = new THREE.Box3(
+      new THREE.Vector3(perimeter.max.x - eastThickness - eastInset, floorY, perimeter.min.z - 0.05),
+      new THREE.Vector3(perimeter.max.x - eastInset, floorY + wallHeight, perimeter.max.z + 0.05)
+    )
+    kitchenColliders.push({ box: eastBox, name: 'Perimeter:manual-east' })
+    if (DEBUG_COLLISION_HELPERS) {
+      console.log(
+        `[COLLIDER manual-east] min=(${eastBox.min.x.toFixed(2)},${eastBox.min.y.toFixed(2)},${eastBox.min.z.toFixed(2)}) max=(${eastBox.max.x.toFixed(2)},${eastBox.max.y.toFixed(2)},${eastBox.max.z.toFixed(2)})`
+      )
+    }
+  }
+
   if (debugCollidersVisible) drawColliderHelpers()
 }
 
@@ -1004,4 +1103,4 @@ window.addEventListener('resize', () => {
   keyDisplay.updatePosition()
   minimapCamera.aspect = 1
   minimapCamera.updateProjectionMatrix()
-})
+}) 
