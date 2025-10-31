@@ -26,9 +26,44 @@ document.body.appendChild(renderer.domElement)
 // Minimap camera (top-down)
 const minimapCamera = new THREE.PerspectiveCamera(60, 1, 0.1, 2000)
 minimapCamera.up.set(0, 0, -1)
-let minimapEnabled = false
+let minimapEnabled = true
 let minimapSize = 220 // pixels
 let minimapMargin = 12
+
+// Create minimap render target
+const minimapRenderTarget = new THREE.WebGLRenderTarget(minimapSize, minimapSize)
+const minimapScene = new THREE.Scene()
+minimapScene.background = new THREE.Color(0x1a1a2e)
+
+// Minimap objects with pulsing animation
+const minimapPlayer = new THREE.Mesh(
+  new THREE.SphereGeometry(0.3, 8, 8),
+  new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+)
+minimapPlayer.name = 'minimapPlayer'
+minimapPlayer.userData.pulseSpeed = 2
+minimapPlayer.userData.pulsePhase = 0
+minimapScene.add(minimapPlayer)
+
+const minimapChef = new THREE.Mesh(
+  new THREE.SphereGeometry(0.4, 8, 8),
+  new THREE.MeshBasicMaterial({ color: 0xff6600 })
+)
+minimapChef.name = 'minimapChef'
+minimapChef.userData.pulseSpeed = 1.5
+minimapChef.userData.pulsePhase = Math.PI
+minimapScene.add(minimapChef)
+
+// Kitchen furniture for minimap
+const minimapFurniture = new THREE.Group()
+minimapFurniture.name = 'minimapFurniture'
+minimapScene.add(minimapFurniture)
+
+// Kitchen bounds for minimap
+let minimapKitchenBounds = null
+
+// Minimap animation
+let minimapTime = 0
 
 const controls = new OrbitControls(camera, renderer.domElement)
 controls.target.set(0, 1.6, 0)
@@ -119,7 +154,7 @@ const spawnRay = new THREE.Raycaster()
 const USE_OBJECT_COLLIDERS = true
 // Visible mesh list used for collisions (only meshes that are actually visible)
 const collidableMeshList = []
-const DEBUG_COLLISION_HELPERS = true
+const DEBUG_COLLISION_HELPERS = false
 // Wall thickness used for simple perimeter collision (meters)
 const WALL_THICKNESS = 0.18
 let kitchenColliders = [] // { box: THREE.Box3, name: string }
@@ -269,9 +304,7 @@ document.addEventListener('keydown', (event) => {
   } else if (key === 'm') {
     minimapEnabled = !minimapEnabled
   } else if (key === 'v') {
-    debugCollidersVisible = !debugCollidersVisible
-    if (debugCollidersVisible) drawColliderHelpers()
-    else clearColliderHelpers()
+    // no-op: debug toggle disabled
   } else if (key === ' ' || event.code === 'Space') {
     event.preventDefault()
     playerControls?.jump()
@@ -364,6 +397,9 @@ const kitchenReady = new Promise((resolve) => {
         center: centerWorld,
       }
 
+      // Create enhanced minimap with furniture
+      createEnhancedMinimap(size, centerWorld)
+
       debugLogLocations('kitchen-loaded')
 
       resolve(kitchenInfo)
@@ -432,6 +468,229 @@ const kitchenReady = new Promise((resolve) => {
     }
   )
 })
+
+function createEnhancedMinimap(size, center) {
+  // Clear previous minimap furniture
+  while (minimapFurniture.children.length > 0) {
+    minimapFurniture.remove(minimapFurniture.children[0])
+  }
+
+  // Create kitchen floor with animated grid
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(size.x, size.z),
+    new THREE.MeshBasicMaterial({ 
+      color: 0x2a2a4a,
+      transparent: true,
+      opacity: 0.8
+    })
+  )
+  floor.rotation.x = -Math.PI / 2
+  floor.position.set(center.x, -0.1, center.z)
+  floor.userData.pulse = true
+  minimapScene.add(floor)
+
+  // Create kitchen walls with outline
+  const wallThickness = 0.3
+  const wallHeight = 0.5
+  const wallMaterial = new THREE.MeshBasicMaterial({ 
+    color: 0x4a4a6a,
+    transparent: true,
+    opacity: 0.7
+  })
+  
+  // North wall
+  const northWall = new THREE.Mesh(
+    new THREE.BoxGeometry(size.x, wallHeight, wallThickness),
+    wallMaterial
+  )
+  northWall.position.set(center.x, wallHeight/2, center.z - size.z/2 + wallThickness/2)
+  minimapScene.add(northWall)
+
+  // South wall
+  const southWall = new THREE.Mesh(
+    new THREE.BoxGeometry(size.x, wallHeight, wallThickness),
+    wallMaterial
+  )
+  southWall.position.set(center.x, wallHeight/2, center.z + size.z/2 - wallThickness/2)
+  minimapScene.add(southWall)
+
+  // East wall
+  const eastWall = new THREE.Mesh(
+    new THREE.BoxGeometry(wallThickness, wallHeight, size.z),
+    wallMaterial
+  )
+  eastWall.position.set(center.x + size.x/2 - wallThickness/2, wallHeight/2, center.z)
+  minimapScene.add(eastWall)
+
+  // West wall
+  const westWall = new THREE.Mesh(
+    new THREE.BoxGeometry(wallThickness, wallHeight, size.z),
+    wallMaterial
+  )
+  westWall.position.set(center.x - size.x/2 + wallThickness/2, wallHeight/2, center.z)
+  minimapScene.add(westWall)
+
+  // Create animated furniture
+  createMinimapFurniture(size, center)
+}
+
+function createMinimapFurniture(size, center) {
+  const furnitureData = [
+    // Counters (rectangles along walls)
+    { type: 'counter', x: center.x - size.x * 0.3, z: center.z - size.z * 0.4, width: 2, depth: 0.8, color: 0x8b4513 },
+    { type: 'counter', x: center.x + size.x * 0.3, z: center.z - size.z * 0.4, width: 2, depth: 0.8, color: 0x8b4513 },
+    { type: 'counter', x: center.x, z: center.z + size.z * 0.3, width: 3, depth: 0.8, color: 0x8b4513 },
+    
+    // Table (center)
+    { type: 'table', x: center.x, z: center.z - size.z * 0.1, width: 1.5, depth: 1, color: 0x654321 },
+    
+    // Fridge (tall rectangle)
+    { type: 'fridge', x: center.x - size.x * 0.4, z: center.z + size.z * 0.4, width: 0.8, depth: 0.6, color: 0xffffff },
+    
+    // Island (larger rectangle)
+    { type: 'island', x: center.x, z: center.z, width: 2.5, depth: 1.2, color: 0xa0522d },
+    
+    // Sink (small square)
+    { type: 'sink', x: center.x + size.x * 0.35, z: center.z + size.z * 0.35, width: 0.6, depth: 0.6, color: 0x708090 },
+    
+    // Stove (small square with red elements)
+    { type: 'stove', x: center.x - size.x * 0.35, z: center.z + size.z * 0.35, width: 0.7, depth: 0.7, color: 0x333333 }
+  ]
+
+  furnitureData.forEach((item, index) => {
+    let geometry
+    let material
+    
+    switch (item.type) {
+      case 'fridge':
+        geometry = new THREE.BoxGeometry(item.width, 1.2, item.depth)
+        material = new THREE.MeshBasicMaterial({ 
+          color: item.color,
+          transparent: true,
+          opacity: 0.9
+        })
+        break
+      case 'table':
+        geometry = new THREE.CylinderGeometry(item.width/2, item.width/2, 0.3, 8)
+        material = new THREE.MeshBasicMaterial({ 
+          color: item.color,
+          transparent: true,
+          opacity: 0.8
+        })
+        break
+      case 'stove':
+        geometry = new THREE.BoxGeometry(item.width, 0.4, item.depth)
+        material = new THREE.MeshBasicMaterial({ 
+          color: item.color,
+          transparent: true,
+          opacity: 0.9
+        })
+        break
+      default:
+        geometry = new THREE.BoxGeometry(item.width, 0.4, item.depth)
+        material = new THREE.MeshBasicMaterial({ 
+          color: item.color,
+          transparent: true,
+          opacity: 0.7
+        })
+    }
+
+    const furniture = new THREE.Mesh(geometry, material)
+    furniture.position.set(item.x, 0.2, item.z)
+    furniture.userData = {
+      type: item.type,
+      pulseSpeed: 0.5 + Math.random() * 1,
+      pulsePhase: Math.random() * Math.PI * 2,
+      originalY: 0.2,
+      hoverHeight: 0.1,
+      rotationSpeed: item.type === 'table' ? 0.2 : 0
+    }
+    
+    // Add special effects based on furniture type
+    if (item.type === 'stove') {
+      // Add red burner dots
+      const burnerGeometry = new THREE.SphereGeometry(0.1, 6, 6)
+      const burnerMaterial = new THREE.MeshBasicMaterial({ 
+        color: 0xff0000,
+        transparent: true,
+        opacity: 0.8
+      })
+      
+      for (let i = -1; i <= 1; i += 2) {
+        for (let j = -1; j <= 1; j += 2) {
+          const burner = new THREE.Mesh(burnerGeometry, burnerMaterial)
+          burner.position.set(i * 0.2, 0.3, j * 0.2)
+          burner.userData.pulseSpeed = 3
+          burner.userData.pulsePhase = Math.random() * Math.PI * 2
+          furniture.add(burner)
+        }
+      }
+    }
+    
+    if (item.type === 'fridge') {
+      // Add fridge door handle
+      const handleGeometry = new THREE.BoxGeometry(0.05, 0.2, 0.02)
+      const handleMaterial = new THREE.MeshBasicMaterial({ color: 0x888888 })
+      const handle = new THREE.Mesh(handleGeometry, handleMaterial)
+      handle.position.set(0.3, 0, 0)
+      furniture.add(handle)
+    }
+
+    minimapFurniture.add(furniture)
+  })
+}
+
+function updateMinimapAnimation(delta) {
+  minimapTime += delta
+  
+  // Update player and chef pulsing
+  updatePulsing(minimapPlayer, delta)
+  updatePulsing(minimapChef, delta)
+  
+  // Update furniture animations
+  minimapFurniture.children.forEach((furniture) => {
+    updatePulsing(furniture, delta)
+    
+    // Special animations based on furniture type
+    switch (furniture.userData.type) {
+      case 'table':
+        furniture.rotation.y += furniture.userData.rotationSpeed * delta
+        break
+      case 'fridge':
+        // Gentle fridge hum/vibration
+        furniture.position.y = furniture.userData.originalY + Math.sin(minimapTime * 8) * 0.02
+        break
+      case 'stove':
+        // Stove glow effect on burners
+        furniture.children.forEach((burner) => {
+          if (burner.userData) {
+            const pulse = Math.sin(minimapTime * burner.userData.pulseSpeed + burner.userData.pulsePhase)
+            burner.material.opacity = 0.6 + 0.4 * pulse
+            burner.scale.setScalar(0.8 + 0.4 * pulse)
+          }
+        })
+        break
+    }
+    
+    // Hover animation for all furniture
+    const hover = Math.sin(minimapTime * furniture.userData.pulseSpeed + furniture.userData.pulsePhase)
+    furniture.position.y = furniture.userData.originalY + hover * furniture.userData.hoverHeight
+  })
+}
+
+function updatePulsing(object, delta) {
+  if (!object.userData) return
+  
+  const pulse = Math.sin(minimapTime * object.userData.pulseSpeed + object.userData.pulsePhase)
+  const scale = 0.8 + 0.4 * (pulse * 0.5 + 0.5)
+  object.scale.setScalar(scale)
+  
+  // Color pulsing for player and chef
+  if (object === minimapPlayer || object === minimapChef) {
+    const intensity = 0.7 + 0.3 * (pulse * 0.5 + 0.5)
+    object.material.color.multiplyScalar(intensity / object.material.color.r)
+  }
+}
 
 function makeKitchenEnvironment() {
   return {
@@ -1031,25 +1290,68 @@ function animate() {
   controls.update()
   renderer.render(scene, camera)
 
-  // Minimap overlay
+  // Update minimap positions
+  if (playerModel) {
+    minimapPlayer.position.set(playerModel.position.x, 0, playerModel.position.z)
+  }
+  if (chefRoot) {
+    minimapChef.position.set(chefRoot.position.x, 0, chefRoot.position.z)
+  }
+
+  // Update minimap animations
+  updateMinimapAnimation(delta)
+
+  // Render minimap
   if (minimapEnabled) {
-    const focus = (playerModel && playerModel.position) || (chefRoot && chefRoot.position)
-    if (focus) {
-      const mapHeight = 35
-      minimapCamera.position.set(focus.x, (focus.y || 0) + mapHeight, focus.z)
-      minimapCamera.lookAt(focus.x, (focus.y || 0), focus.z)
-    }
+    // Position minimap camera above the scene
+    const focus = playerModel ? playerModel.position : (chefRoot ? chefRoot.position : new THREE.Vector3(0, 0, 0))
+    minimapCamera.position.set(focus.x, 35, focus.z)
+    minimapCamera.lookAt(focus.x, 0, focus.z)
+
+    // Render minimap to texture
+    renderer.setRenderTarget(minimapRenderTarget)
+    renderer.render(minimapScene, minimapCamera)
+    renderer.setRenderTarget(null)
+
+    // Draw minimap to screen
     renderer.clearDepth()
-    renderer.setScissorTest(true)
     const w = minimapSize
     const h = minimapSize
     const x = window.innerWidth - w - minimapMargin
     const y = minimapMargin
-    renderer.setViewport(x, y, w, h)
+    
+    // Draw minimap background with border
+    renderer.setScissorTest(true)
     renderer.setScissor(x, y, w, h)
-    minimapCamera.aspect = 1
-    minimapCamera.updateProjectionMatrix()
-    renderer.render(scene, minimapCamera)
+    renderer.setViewport(x, y, w, h)
+    
+    // Create a background for the minimap with enhanced styling
+    const backgroundScene = new THREE.Scene()
+    const backgroundCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+    
+    // Background with gradient effect
+    const backgroundGeometry = new THREE.PlaneGeometry(2, 2)
+    const backgroundMaterial = new THREE.MeshBasicMaterial({ 
+      map: minimapRenderTarget.texture,
+      transparent: true,
+      opacity: 0.95
+    })
+    const backgroundMesh = new THREE.Mesh(backgroundGeometry, backgroundMaterial)
+    backgroundScene.add(backgroundMesh)
+    
+    // Add border
+    const borderGeometry = new THREE.RingGeometry(0.98, 1, 32)
+    const borderMaterial = new THREE.MeshBasicMaterial({ 
+      color: 0x00ffff,
+      transparent: true,
+      opacity: 0.8,
+      side: THREE.DoubleSide
+    })
+    const border = new THREE.Mesh(borderGeometry, borderMaterial)
+    border.rotation.x = Math.PI
+    backgroundScene.add(border)
+    
+    renderer.render(backgroundScene, backgroundCamera)
     renderer.setScissorTest(false)
     renderer.setViewport(0, 0, window.innerWidth, window.innerHeight)
   }
@@ -1067,4 +1369,4 @@ window.addEventListener('resize', () => {
   keyDisplay.updatePosition()
   minimapCamera.aspect = 1
   minimapCamera.updateProjectionMatrix()
-}) 
+})
