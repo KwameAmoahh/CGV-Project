@@ -727,46 +727,67 @@ function makeKitchenEnvironment() {
         return out
       }
 
-      const out = desired.clone()
+      let out = desired.clone()
 
       // Player bounding box (rough capsule approximation)
       const playerHeight = 1.6
-      const playerBox = new THREE.Box3(
+      let playerBox = new THREE.Box3(
         new THREE.Vector3(out.x - radius, kitchenInfo.floorY, out.z - radius),
         new THREE.Vector3(out.x + radius, kitchenInfo.floorY + playerHeight, out.z + radius)
       )
 
       let collided = false
 
-      // Loop over all furniture / wall colliders
-      for (const c of kitchenColliders) {
-        const box = c.box
-        if (!box) continue
-        if (playerBox.intersectsBox(box)) {
-          collided = true
+      // Iterative collision resolution
+      for (let iteration = 0; iteration < 3; iteration++) {
+        let hadCollision = false
 
-          // Compute overlap in X and Z
-          const overlapX = Math.min(box.max.x - playerBox.min.x, playerBox.max.x - box.min.x)
-          const overlapZ = Math.min(box.max.z - playerBox.min.z, playerBox.max.z - box.min.z)
+        // Loop over all furniture / wall colliders
+        for (const c of kitchenColliders) {
+          const box = c.box
+          if (!box) continue
 
-          // Skip pathological overlaps (likely a perimeter box or malformed collider)
-          if (Math.abs(overlapX) > 3 || Math.abs(overlapZ) > 3) continue
+          if (playerBox.intersectsBox(box)) {
+            collided = true
+            hadCollision = true
 
-          if (Math.abs(overlapX) < 0.015 || Math.abs(overlapZ) < 0.015) continue
+            // Calculate penetration from all sides
+            const penetrationLeft = playerBox.max.x - box.min.x
+            const penetrationRight = box.max.x - playerBox.min.x
+            const penetrationBack = playerBox.max.z - box.min.z
+            const penetrationForward = box.max.z - playerBox.min.z
 
-          // Push out along smallest overlap axis
-          if (overlapX < overlapZ) {
-            if (playerBox.min.x < box.min.x) out.x -= overlapX
-            else out.x += overlapX
-          } else {
-            if (playerBox.min.z < box.min.z) out.z -= overlapZ
-            else out.z += overlapZ
+            const minPenX = Math.min(penetrationLeft, penetrationRight)
+            const minPenZ = Math.min(penetrationBack, penetrationForward)
+
+            // Skip if too deep or too shallow
+            if (minPenX > 5 || minPenZ > 5) continue
+            if (minPenX < 0.001 || minPenZ < 0.001) continue
+
+            // Push out on axis with smallest penetration
+            if (minPenX < minPenZ) {
+              if (penetrationLeft < penetrationRight) {
+                out.x -= minPenX + 0.001
+              } else {
+                out.x += minPenX + 0.001
+              }
+            } else {
+              if (penetrationBack < penetrationForward) {
+                out.z -= minPenZ + 0.001
+              } else {
+                out.z += minPenZ + 0.001
+              }
+            }
+
+            // Recreate playerBox after push
+            playerBox = new THREE.Box3(
+              new THREE.Vector3(out.x - radius, kitchenInfo.floorY, out.z - radius),
+              new THREE.Vector3(out.x + radius, kitchenInfo.floorY + playerHeight, out.z + radius)
+            )
           }
-
-          // Update playerBox after push to prevent double penetration
-          playerBox.min.set(out.x - radius, kitchenInfo.floorY, out.z - radius)
-          playerBox.max.set(out.x + radius, kitchenInfo.floorY + playerHeight, out.z + radius)
         }
+
+        if (!hadCollision) break
       }
 
       // Clamp to outer kitchen walls (safety margin)
@@ -817,7 +838,48 @@ function buildKitchenColliders() {
   const tempBox = new THREE.Box3()
   const minHeightAsObstacle = Math.max(0.06, kitchenInfo.height * 0.015)
   kitchenRootRef.updateMatrixWorld(true)
-  // Build only from visible meshes we registered
+
+  // ADD WALLS FIRST - scan ALL Material meshes for walls
+  const wallHeight = kitchenInfo.height || 8
+  const floorY = kitchenInfo.floorY
+  let wallCount = 0
+
+  kitchenRootRef.traverse((child) => {
+    if (!child.isMesh) return
+    const name = (child.name || '').toLowerCase()
+
+    if (name.startsWith('material')) {
+      tempBox.setFromObject(child)
+      if (tempBox.isEmpty()) return
+
+      const size = tempBox.getSize(new THREE.Vector3())
+
+      // SUPER AGGRESSIVE: Add almost everything as walls
+      // Just exclude tiny stuff and things that are thick in BOTH dimensions
+      const notMicroscopic = (size.x > 0.05 && size.z > 0.05 && size.y > 0.3)
+      const notMassiveCube = !(size.x > 2 && size.z > 2 && size.y > 2)
+
+      if (notMicroscopic && notMassiveCube) {
+        const box = tempBox.clone()
+        box.min.y = floorY
+        box.max.y = floorY + wallHeight
+
+        // INFLATE to fill gaps between wall pieces
+        box.min.x -= 0.3
+        box.min.z -= 0.3
+        box.max.x += 0.3
+        box.max.z += 0.3
+
+        kitchenColliders.push({ box, name: `Wall: ${child.name}` })
+        wallCount++
+      }
+    }
+  })
+
+  console.log(`[Colliders] Added ${wallCount} walls`)
+
+  // Build furniture colliders from visible meshes we registered
+  let furnitureCount = 0
   for (const obj of collidableMeshList) {
     tempBox.setFromObject(obj)
     if (tempBox.isEmpty()) continue
@@ -834,7 +896,10 @@ function buildKitchenColliders() {
     box.min.x -= inflate; box.min.z -= inflate
     box.max.x += inflate; box.max.z += inflate
     kitchenColliders.push({ box, name: obj.name || '(unnamed mesh)' })
+    furnitureCount++
   }
+
+  console.log(`[Colliders] ✓ Built ${kitchenColliders.length} total colliders (${wallCount} walls + ${furnitureCount} furniture)`)
   if (debugCollidersVisible) drawColliderHelpers()
 }
 
