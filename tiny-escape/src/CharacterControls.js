@@ -32,10 +32,11 @@ export class CharacterControls {
         this.playerHeight = 1.2
 
         this.cameraMode = 'third'
-        this.firstPersonHeight = 0.8  // Eye height for first-person view - lower for tiny character
-        this.firstPersonForwardOffset = 0.15  // Forward offset to prevent seeing inside walls
+        this.firstPersonHeight = 1.0  // Same height as third-person
+        this.firstPersonForwardOffset = 0.4  // Position slightly ahead of body
 
         this.thirdPersonOffset = new THREE.Vector3(0, 1.2, -3.2)
+        this.firstPersonOffset = new THREE.Vector3(0, 1.2, 0.5)  // Same height, but ahead of body
         this._thirdPersonMin = this.orbitControl.minDistance
         this._thirdPersonMax = this.orbitControl.maxDistance
 
@@ -62,7 +63,8 @@ export class CharacterControls {
         this.fpsYaw = new THREE.Object3D()
         this.fpsPitch = new THREE.Object3D()
         this.fpsCameraHolder = new THREE.Object3D()
-        this.fpsCameraHolder.position.set(0, 0, -this.firstPersonForwardOffset)
+        // No offset - position set dynamically
+        this.fpsCameraHolder.position.set(0, 0, 0)
         this.fpsYaw.add(this.fpsPitch)
         this.fpsPitch.add(this.fpsCameraHolder)
 
@@ -170,6 +172,7 @@ export class CharacterControls {
             let desiredMove = new THREE.Vector3(0, 0, 0)
 
             if (this.cameraMode === 'first') {
+                // Get camera forward and right directions
                 const forward = new THREE.Vector3()
                 this.camera.getWorldDirection(forward)
                 forward.y = 0
@@ -177,11 +180,16 @@ export class CharacterControls {
                 forward.normalize()
 
                 const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize()
+
+                // Build movement vector based on keys
                 if (keysPressed[W]) desiredMove.add(forward)
                 if (keysPressed[S]) desiredMove.sub(forward)
                 if (keysPressed[A]) desiredMove.sub(right)
                 if (keysPressed[D]) desiredMove.add(right)
-                if (desiredMove.lengthSq() > 0) desiredMove.normalize()
+
+                if (desiredMove.lengthSq() > 0) {
+                    desiredMove.normalize()
+                }
             } else {
                 const angleYCameraDirection = Math.atan2(
                     this.camera.position.x - this.model.position.x,
@@ -318,25 +326,26 @@ export class CharacterControls {
     updateCameraTarget(moveX, moveZ) {
         if (!this.camera) return
 
+        this.cameraTarget.set(
+            this.model.position.x,
+            this.model.position.y + 1,
+            this.model.position.z
+        )
+
         if (this.cameraMode === 'third') {
+            // Third-person: camera behind player, looking at player
+            this.camera.position.x += moveX
+            this.camera.position.z += moveZ
+            this.orbitControl.target.copy(this.cameraTarget)
+        } else {
+            // First-person: camera ahead of player, looking forward (not back at player)
             this.camera.position.x += moveX
             this.camera.position.z += moveZ
 
-            this.cameraTarget.set(
-                this.model.position.x,
-                this.model.position.y + 1,
-                this.model.position.z
-            )
-            this.orbitControl.target.copy(this.cameraTarget)
-        } else {
-            if (this.model.parent && this.fpsYaw.parent !== this.model.parent) {
-                this.model.parent.add(this.fpsYaw)
-            }
-            this.fpsYaw.position.set(
-                this.model.position.x,
-                this.model.position.y + this.firstPersonHeight,
-                this.model.position.z
-            )
+            // Set orbit target ahead of player so camera looks forward (flipped 180 degrees)
+            const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.model.quaternion)
+            const lookAheadTarget = this.cameraTarget.clone().add(forward.multiplyScalar(3.0))
+            this.orbitControl.target.copy(lookAheadTarget)
         }
     }
 
@@ -368,107 +377,91 @@ export class CharacterControls {
         return offset
     }
 
-    toggleCameraMode() {
+     toggleCameraMode() {
         if (this.cameraMode === 'third') {
+            // Switch to first-person: move camera in front of player
             this.cameraMode = 'first';
-            this.orbitControl.enabled = false;
 
-            this._savedCameraState = {
-                position: this.camera.position.clone(),
-                quaternion: this.camera.quaternion.clone(),
-                target: this.orbitControl.target.clone()
-            };
-
-            if (this.model.parent && this.fpsYaw.parent !== this.model.parent) {
-                this.model.parent.add(this.fpsYaw);
-            }
-
-            this.fpsYaw.position.set(
-                this.model.position.x,
-                this.model.position.y + this.firstPersonHeight,
-                this.model.position.z
-            );
-
-            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.model.quaternion);
-            const yaw = Math.atan2(forward.x, forward.z);
-            this.fpsYaw.rotation.set(0, yaw, 0);
-
-            // Reset pitch to look slightly down for better view
-            this.fpsPitch.rotation.set(-0.1, 0, 0);
-
-            // Attach camera to FPS rig
-            this.fpsCameraHolder.add(this.camera);
-            this.camera.position.set(0, 0, 0);
-            this.camera.rotation.set(0, 0, 0);
-
-            // Adjust camera near plane for first-person to prevent clipping
-            this.camera.near = 0.1;
-            this.camera.updateProjectionMatrix();
-
-            this._modelVisibleBeforeFPS = this.model.visible;
+            // Hide player model
             this.model.visible = false;
+            this.model.traverse((child) => {
+                child.visible = false;
+            });
 
-            this._installPointerLock();
+            // Position camera ahead of player
+            const firstPersonPos = this.getFirstPersonCameraPos();
+            this.camera.position.copy(firstPersonPos);
+
+            // Set orbit target ahead so camera looks forward (flipped 180 degrees from third-person)
+            const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.model.quaternion);
+            const lookAheadTarget = this.cameraTarget.clone().add(forward.multiplyScalar(3.0));
+            this.orbitControl.target.copy(lookAheadTarget);
+
+            console.log('[Camera] Switched to first-person (camera ahead of body)');
         } else {
+            // Switch back to third-person: move camera behind player
             this.cameraMode = 'third';
 
-            this.model.visible = this._modelVisibleBeforeFPS ?? true;
+            // Show player model
+            this.model.visible = true;
+            this.model.traverse((child) => {
+                child.visible = true;
+            });
 
-            this._removePointerLock();
+            // Position camera behind player
+            const thirdPersonPos = this.getThirdPersonCameraPos();
+            this.camera.position.copy(thirdPersonPos);
 
-            // Detach camera from FPS rig
-            this.fpsCameraHolder.remove(this.camera);
-            const parent = this.model.parent || this.fpsYaw.parent;
-            if (parent) parent.add(this.camera);
-            if (this.fpsYaw.parent) this.fpsYaw.parent.remove(this.fpsYaw);
+            // Set orbit target to player so camera looks at player
+            this.orbitControl.target.copy(this.cameraTarget);
 
-            // Restore camera near plane for third-person
-            this.camera.near = 0.05;
-            this.camera.updateProjectionMatrix();
-
-            if (this._savedCameraState) {
-                this.camera.position.copy(this._savedCameraState.position);
-                this.camera.quaternion.copy(this._savedCameraState.quaternion);
-                this.orbitControl.target.copy(this._savedCameraState.target);
-            } else {
-                const desired = this.getThirdPersonCameraPos();
-                this.camera.position.copy(desired);
-                this.cameraTarget.set(
-                    this.model.position.x,
-                    this.model.position.y + 1,
-                    this.model.position.z
-                );
-                this.orbitControl.target.copy(this.cameraTarget);
-            }
-
-            // Re-enable orbit controls
-            this.orbitControl.enabled = true;
-            this.orbitControl.minDistance = this._thirdPersonMin;
-            this.orbitControl.maxDistance = this._thirdPersonMax;
-            this.orbitControl.update();
+            console.log('[Camera] Switched to third-person (camera behind body)');
         }
     }
 
 
+
     _installPointerLock() {
         const element = document.body
+
+        // Track camera rotation (preserve existing values if already set)
+        if (this._cameraYaw === undefined) this._cameraYaw = 0
+        if (this._cameraPitch === undefined) this._cameraPitch = 0
+
         this._onMouseMove = (event) => {
-            if (!this._pointerLocked) return
+            // Check if pointer is actually locked
+            if (document.pointerLockElement !== element) return
+
             const dx = event.movementX || 0
             const dy = event.movementY || 0
-            this.fpsYaw.rotation.y -= dx * this.fpsSensitivity
-            this.fpsPitch.rotation.x = THREE.MathUtils.clamp(
-                this.fpsPitch.rotation.x - dy * this.fpsSensitivity,
+
+            // Update yaw and pitch
+            this._cameraYaw -= dx * this.fpsSensitivity
+            this._cameraPitch -= dy * this.fpsSensitivity
+
+            // Clamp pitch
+            this._cameraPitch = THREE.MathUtils.clamp(
+                this._cameraPitch,
                 this.fpsPitchMin,
                 this.fpsPitchMax
             )
         }
+
         this._onPointerLockChange = () => {
             this._pointerLocked = document.pointerLockElement === element
+            console.log('[FPS] Pointer lock status:', this._pointerLocked)
         }
+
         element.addEventListener('mousemove', this._onMouseMove)
         document.addEventListener('pointerlockchange', this._onPointerLockChange)
-        element.requestPointerLock?.()
+
+        // Request pointer lock
+        element.requestPointerLock().then(() => {
+            console.log('[FPS] Pointer lock acquired')
+            this._pointerLocked = true
+        }).catch((err) => {
+            console.error('[FPS] Pointer lock failed:', err)
+        })
     }
 
     _removePointerLock() {
@@ -489,6 +482,12 @@ export class CharacterControls {
 
     getThirdPersonCameraPos() {
         const offset = this.thirdPersonOffset.clone().applyQuaternion(this.model.quaternion)
+        return this.model.position.clone().add(offset)
+    }
+
+    getFirstPersonCameraPos() {
+        // Same as third-person: apply player rotation to offset to position camera ahead
+        const offset = this.firstPersonOffset.clone().applyQuaternion(this.model.quaternion)
         return this.model.position.clone().add(offset)
     }
 }
