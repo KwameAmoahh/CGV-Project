@@ -121,7 +121,7 @@ export class CharacterControls {
 
         let desiredAction = ''
         if (!this.isOnGround || this.velocityY > 0.1) {
-            desiredAction = 'jump'
+            desiredAction = 'Jump'
         } else if (directionPressed && this.toggleRun) {
             desiredAction = 'run'
         } else if (directionPressed) {
@@ -138,7 +138,7 @@ export class CharacterControls {
                 console.warn(`Requested animation "${desiredAction}" not found. Available:`, [...this.animationsMap.keys()])
             } else {
                 if (current) current.fadeOut(this.fadeDuration)
-                if (desiredAction === 'jump') {
+                if (desiredAction === 'Jump') {
                     toPlay.reset().setLoop(THREE.LoopOnce, 1)
                     toPlay.clampWhenFinished = true
                     toPlay.fadeIn(this.fadeDuration).play()

@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <title>3D Character Demo</title>
+  <!-- Preload UI music to start it as fast as possible -->
+  <link rel="preload" href="/assets/models/ui_song.mp3" as="audio">
   <style>
     body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
     #hud {
@@ -13,6 +15,11 @@
   </style>
 </head>
 <body>
+  <!-- Hidden audio element that preloads for instant playback -->
+  <audio id="ui-music" src="/assets/models/ui_song.mp3" loop preload="auto"></audio>
+
+  <div id="root"></div>
+
   <div id="hud">
     <h3>Controls</h3>
     <p>WASD: Move<br>Shift: Toggle Run</p>
