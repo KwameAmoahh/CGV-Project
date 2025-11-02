@@ -99,7 +99,10 @@ export class CharacterControls {
             this._climbTimer += delta
             const t = Math.min(1, this._climbTimer / Math.max(0.001, this._climbDuration))
             this.model.position.lerpVectors(this._climbStart, this._climbEnd, t)
-            this.updateCameraTarget(0, 0)
+            this.updateCameraTarget(moveX, moveZ)
+            if (this.cameraMode === 'third') {
+                this.updateCameraCollision()
+            }
             if (t >= 1) {
                 this.isClimbing = false
                 this.isOnGround = true
@@ -319,8 +322,33 @@ export class CharacterControls {
         if (!this.camera) return
 
         if (this.cameraMode === 'third') {
-            this.camera.position.x += moveX
-            this.camera.position.z += moveZ
+            // Store current camera position for collision checking
+            const currentCamPos = this.camera.position.clone()
+            
+            // Calculate desired camera position
+            const desiredCamPos = currentCamPos.clone()
+            desiredCamPos.x += moveX
+            desiredCamPos.z += moveZ
+            
+            // Resolve camera collisions if environment exists
+            let finalCamPos = desiredCamPos
+            if (this.environment) {
+                // Use a smaller radius for camera collision to prevent clipping
+                const cameraRadius = 0.08
+                const cameraHeight = 0.5 // Reduced height for camera collision
+                
+                // Resolve collision for camera position
+                finalCamPos = this.environment.resolveCollision(
+                    currentCamPos,
+                    desiredCamPos,
+                    cameraRadius,
+                    cameraHeight,
+                    this.model.quaternion
+                )
+            }
+            
+            // Apply the collision-resolved position
+            this.camera.position.copy(finalCamPos)
 
             this.cameraTarget.set(
                 this.model.position.x,
@@ -328,7 +356,11 @@ export class CharacterControls {
                 this.model.position.z
             )
             this.orbitControl.target.copy(this.cameraTarget)
+            
+            // Also constrain orbit controls to prevent camera from going through walls
+            this._constrainOrbitControls()
         } else {
+            // First-person mode - camera is attached to player, so collisions are handled by player movement
             if (this.model.parent && this.fpsYaw.parent !== this.model.parent) {
                 this.model.parent.add(this.fpsYaw)
             }
@@ -338,6 +370,94 @@ export class CharacterControls {
                 this.model.position.z
             )
         }
+    }
+
+    _constrainOrbitControls() {
+        if (!this.orbitControl || !this.environment) return
+        
+        // Get camera direction from player to camera
+        const cameraOffset = new THREE.Vector3()
+        cameraOffset.subVectors(this.camera.position, this.model.position)
+        
+        // Raycast from player to camera to check for walls
+        this._raycaster.set(this.model.position, cameraOffset.normalize())
+        this._raycaster.far = cameraOffset.length()
+        
+        const meshes = (this.environment && (this.environment._walkableMeshes || [])) || []
+        const hits = this._raycaster.intersectObjects(meshes, true)
+        
+        if (hits.length > 0) {
+            const hit = hits[0]
+            // If there's a wall between player and camera, move camera closer
+            if (hit.distance < this._raycaster.far) {
+                // Move camera to just in front of the wall
+                const newOffset = hit.point.clone().sub(this.model.position)
+                newOffset.multiplyScalar(0.95) // Keep a small gap from the wall
+                
+                this.camera.position.copy(this.model.position).add(newOffset)
+                this.orbitControl.update()
+            }
+        }
+        
+        // Additional constraint: prevent camera from going below floor
+        let groundY = 0
+        if (this.environment) {
+            const info = this.environment.getGroundInfo(this.camera.position)
+            if (info && typeof info.y === 'number') groundY = info.y
+        }
+        
+        const minCameraHeight = groundY + 0.3 // Keep camera above ground
+        if (this.camera.position.y < minCameraHeight) {
+            this.camera.position.y = minCameraHeight
+            this.orbitControl.update()
+        }
+    }
+
+    // Add this method to the CharacterControls class
+    updateCameraCollision() {
+        if (this.cameraMode !== 'third' || !this.orbitControl || !this.environment) return
+        
+        const idealOffset = this.getThirdPersonCameraPos()
+        const direction = new THREE.Vector3()
+        direction.subVectors(idealOffset, this.model.position).normalize()
+        
+        const maxDistance = this.thirdPersonOffset.length()
+        let actualDistance = maxDistance
+        
+        // Check for walls between player and ideal camera position
+        this._raycaster.set(this.model.position, direction)
+        this._raycaster.far = maxDistance
+        
+        const meshes = (this.environment._walkableMeshes || [])
+        const hits = this._raycaster.intersectObjects(meshes, true)
+        
+        if (hits.length > 0) {
+            const hit = hits[0]
+            // If we hit a wall, use the hit distance (with a small gap)
+            actualDistance = Math.max(0.5, hit.distance - 0.1)
+        }
+        
+        // Calculate final camera position
+        const finalPosition = this.model.position.clone()
+        finalPosition.add(direction.multiplyScalar(actualDistance))
+        
+        // Ensure camera stays above ground
+        let groundY = 0
+        const groundInfo = this.environment.getGroundInfo(finalPosition)
+        if (groundInfo && typeof groundInfo.y === 'number') groundY = groundInfo.y
+        
+        finalPosition.y = Math.max(finalPosition.y, groundY + 0.3)
+        
+        // Smoothly move camera to the collision-adjusted position
+        this.camera.position.lerp(finalPosition, 0.3)
+        
+        // Update orbit controls
+        this.cameraTarget.set(
+            this.model.position.x,
+            this.model.position.y + 1,
+            this.model.position.z
+        )
+        this.orbitControl.target.copy(this.cameraTarget)
     }
 
     setEnvironment(env) {
@@ -488,7 +608,12 @@ export class CharacterControls {
     }
 
     getThirdPersonCameraPos() {
-        const offset = this.thirdPersonOffset.clone().applyQuaternion(this.model.quaternion)
-        return this.model.position.clone().add(offset)
+        // Calculate the ideal camera position based on player orientation
+        const offset = this.thirdPersonOffset.clone()
+        
+        // Apply player's rotation to the offset
+        const rotatedOffset = offset.clone().applyQuaternion(this.model.quaternion)
+        
+        return this.model.position.clone().add(rotatedOffset)
     }
 }
