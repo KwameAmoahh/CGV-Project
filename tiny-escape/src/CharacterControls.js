@@ -32,8 +32,8 @@ export class CharacterControls {
         this.playerHeight = 1.2
 
         this.cameraMode = 'third'
-        this.firstPersonHeight = 0.45
-        this.firstPersonForwardOffset = 0.1
+        this.firstPersonHeight = 0.8  // Eye height for first-person view - lower for tiny character
+        this.firstPersonForwardOffset = 0.15  // Forward offset to prevent seeing inside walls
 
         this.thirdPersonOffset = new THREE.Vector3(0, 1.2, -3.2)
         this._thirdPersonMin = this.orbitControl.minDistance
@@ -66,9 +66,9 @@ export class CharacterControls {
         this.fpsYaw.add(this.fpsPitch)
         this.fpsPitch.add(this.fpsCameraHolder)
 
-        this.fpsSensitivity = 0.0025
-        this.fpsPitchMin = -Math.PI / 2 + 0.05
-        this.fpsPitchMax = Math.PI / 2 - 0.05
+        this.fpsSensitivity = 0.002  // Smooth mouse sensitivity
+        this.fpsPitchMin = -Math.PI / 2 + 0.1  // Can't look straight down (prevents disorientation)
+        this.fpsPitchMax = Math.PI / 2 - 0.1  // Can't look straight up
         this._pointerLocked = false
         this._onMouseMove = null
         this._onPointerLockChange = null
@@ -393,13 +393,17 @@ export class CharacterControls {
             const yaw = Math.atan2(forward.x, forward.z);
             this.fpsYaw.rotation.set(0, yaw, 0);
 
-            // Reset pitch
-            this.fpsPitch.rotation.set(0, 0, 0);
+            // Reset pitch to look slightly down for better view
+            this.fpsPitch.rotation.set(-0.1, 0, 0);
 
             // Attach camera to FPS rig
             this.fpsCameraHolder.add(this.camera);
             this.camera.position.set(0, 0, 0);
             this.camera.rotation.set(0, 0, 0);
+
+            // Adjust camera near plane for first-person to prevent clipping
+            this.camera.near = 0.1;
+            this.camera.updateProjectionMatrix();
 
             this._modelVisibleBeforeFPS = this.model.visible;
             this.model.visible = false;
@@ -417,6 +421,10 @@ export class CharacterControls {
             const parent = this.model.parent || this.fpsYaw.parent;
             if (parent) parent.add(this.camera);
             if (this.fpsYaw.parent) this.fpsYaw.parent.remove(this.fpsYaw);
+
+            // Restore camera near plane for third-person
+            this.camera.near = 0.05;
+            this.camera.updateProjectionMatrix();
 
             if (this._savedCameraState) {
                 this.camera.position.copy(this._savedCameraState.position);

@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { CharacterControls } from './CharacterControls.js'
 import { UI } from './ui.js'
+import { W, A, S, D } from './utils.js'
 
 // ----------------------------------------------------------------------------- //
 // Scene + Camera
@@ -57,6 +58,17 @@ minimapChef.userData.pulseSpeed = 1.5
 minimapChef.userData.pulsePhase = Math.PI
 minimapScene.add(minimapChef)
 
+// Checkpoint marker for minimap (Level 1)
+const minimapCheckpoint = new THREE.Mesh(
+  new THREE.CylinderGeometry(0.5, 0.5, 0.3, 16),
+  new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+)
+minimapCheckpoint.name = 'minimapCheckpoint'
+minimapCheckpoint.userData.pulseSpeed = 2.5
+minimapCheckpoint.userData.pulsePhase = Math.PI / 2
+minimapCheckpoint.position.set(0, 0, -29) // Checkpoint position
+minimapScene.add(minimapCheckpoint)
+
 // Kitchen furniture for minimap
 const minimapFurniture = new THREE.Group()
 minimapFurniture.name = 'minimapFurniture'
@@ -67,6 +79,20 @@ let minimapKitchenBounds = null
 
 // Minimap animation
 let minimapTime = 0
+
+// Footstep sounds
+const walkingFootsteps = new Audio('/assets/models/walking_footsteps.wav')
+walkingFootsteps.loop = true
+walkingFootsteps.volume = 0.6  // Increased volume for better audibility
+walkingFootsteps.preload = 'auto'
+const runningFootsteps = new Audio('/assets/models/running_footsteps.wav')
+runningFootsteps.loop = true
+runningFootsteps.volume = 0.7  // Increased volume for better audibility
+runningFootsteps.preload = 'auto'
+
+let currentFootstepSound = null
+let isPlayingFootsteps = false
+let footstepSoundsReady = false
 
 const controls = new OrbitControls(camera, renderer.domElement)
 controls.target.set(0, 1.6, 0)
@@ -312,6 +338,19 @@ document.addEventListener('keydown', (event) => {
     if (gameStarted && !ui.pause.style.display || ui.pause.style.display === 'none') {
       gameStarted = false
       gamePausedTime = Date.now() // Track when we paused
+
+      // Stop all footstep sounds when pausing
+      if (!walkingFootsteps.paused) {
+        walkingFootsteps.pause()
+        walkingFootsteps.currentTime = 0
+      }
+      if (!runningFootsteps.paused) {
+        runningFootsteps.pause()
+        runningFootsteps.currentTime = 0
+      }
+      isPlayingFootsteps = false
+      currentFootstepSound = null
+
       ui.showPause(true)
       document.exitPointerLock?.()
     } else if (ui.pause.style.display === 'flex') {
@@ -452,6 +491,10 @@ function startGame() {
   // Show the game canvas now that everything is loaded
   renderer.domElement.style.display = 'block';
   document.body.requestPointerLock?.()
+
+  // Show level info HUD
+  const levelInfo = document.getElementById('level-info')
+  if (levelInfo) levelInfo.style.display = 'block'
 
   // Start the level timer
   gameStartTime = Date.now()
@@ -898,11 +941,12 @@ function createMinimapFurniture(size, center) {
 
 function updateMinimapAnimation(delta) {
   minimapTime += delta
-  
-  // Update player and chef pulsing
+
+  // Update player, chef, and checkpoint pulsing
   updatePulsing(minimapPlayer, delta)
   updatePulsing(minimapChef, delta)
-  
+  updatePulsing(minimapCheckpoint, delta)
+
   // Update furniture animations
   minimapFurniture.children.forEach((furniture) => {
     updatePulsing(furniture, delta)
@@ -1495,6 +1539,52 @@ function animate() {
     if (chefMixer) chefMixer.update(delta)
     if (playerControls) playerControls.update(delta, keysPressed)
 
+    // Update footstep sounds based on player movement
+    if (playerControls) {
+      const isMoving = keysPressed[W] || keysPressed[A] || keysPressed[S] || keysPressed[D]
+      const isRunning = playerControls.toggleRun && isMoving
+
+      if (isMoving) {
+        // Determine which sound should be playing
+        const targetSound = isRunning ? runningFootsteps : walkingFootsteps
+        const otherSound = isRunning ? walkingFootsteps : runningFootsteps
+
+        // Stop the other sound if it's playing
+        if (otherSound && !otherSound.paused) {
+          otherSound.pause()
+          otherSound.currentTime = 0
+        }
+
+        // Ensure the target sound is playing
+        if (targetSound.paused) {
+          currentFootstepSound = targetSound
+          targetSound.play()
+            .then(() => {
+              footstepSoundsReady = true
+              isPlayingFootsteps = true
+            })
+            .catch(e => {
+              // Silently handle browser autoplay restrictions
+              footstepSoundsReady = false
+            })
+        }
+      } else {
+        // Stop all footsteps when not moving
+        if (isPlayingFootsteps) {
+          if (walkingFootsteps && !walkingFootsteps.paused) {
+            walkingFootsteps.pause()
+            walkingFootsteps.currentTime = 0
+          }
+          if (runningFootsteps && !runningFootsteps.paused) {
+            runningFootsteps.pause()
+            runningFootsteps.currentTime = 0
+          }
+          isPlayingFootsteps = false
+          currentFootstepSound = null
+        }
+      }
+    }
+
     if (!CHEF_IDLE_ONLY) updateBehavior(delta)
 
     // Level timer update
@@ -1513,21 +1603,60 @@ function animate() {
         const dist = playerModel.position.distanceTo(checkpointPos)
         if (dist < 1.5) {
           checkpointReached = true
+          gameStarted = false
           const warningEl = document.getElementById('warning-text')
           if (warningEl) {
             warningEl.textContent = 'Checkpoint reached! You are safe.'
             warningEl.style.color = '#00ff00'
           }
+
+          // Stop all footstep sounds
+          if (!walkingFootsteps.paused) {
+            walkingFootsteps.pause()
+            walkingFootsteps.currentTime = 0
+          }
+          if (!runningFootsteps.paused) {
+            runningFootsteps.pause()
+            runningFootsteps.currentTime = 0
+          }
+          isPlayingFootsteps = false
+          currentFootstepSound = null
+
+          // Show level complete screen
+          setTimeout(() => {
+            ui.showLevelComplete(true)
+          }, 500)
         }
       }
 
       // Timer expired
       if (timeLeft <= 0 && !checkpointReached) {
+        gameStarted = false
         const warningEl = document.getElementById('warning-text')
         if (warningEl) {
           warningEl.textContent = 'Time\'s up! The chef caught you!'
           warningEl.style.color = '#ff0000'
         }
+
+        // Stop all footstep sounds
+        if (!walkingFootsteps.paused) {
+          walkingFootsteps.pause()
+          walkingFootsteps.currentTime = 0
+        }
+        if (!runningFootsteps.paused) {
+          runningFootsteps.pause()
+          runningFootsteps.currentTime = 0
+        }
+        isPlayingFootsteps = false
+        currentFootstepSound = null
+
+        // Show level failed screen
+        setTimeout(() => {
+          ui.showLevelFailed(true)
+        }, 1000)
+
+        // Prevent this from triggering multiple times
+        gameStartTime = 0
       }
     }
   }

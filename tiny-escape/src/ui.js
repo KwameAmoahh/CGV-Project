@@ -903,6 +903,77 @@ export class UI {
       this.showControls(true)
     }
 
+    // Level Complete menu
+    this.levelComplete = document.createElement('div')
+    this.levelComplete.className = 'panel'
+    this.levelComplete.style.display = 'none'
+    this.levelComplete.innerHTML = `
+      <div class="particles" id="level-complete-particles"></div>
+      <div class="card">
+        <div class="title" style="color: #00ff00;">🎉 LEVEL COMPLETE! 🎉</div>
+        <div class="subtitle">You Escaped the Freezer!</div>
+        <div class="blurb" id="level-complete-message">
+          Great job! You successfully escaped from the top freezer before the chef returned.
+        </div>
+        <div class="section">
+          <div class="section-title">NEXT LEVEL</div>
+          <p style="font-size: 18px; color: #ffaa00; text-align: center; margin: 20px 0;">
+            🚧 Level 2: "The Great Countertop Escape" 🚧<br>
+            <span style="font-size: 14px; opacity: 0.7;">(Coming Soon™ - We're still teaching the chef to cook)</span>
+          </p>
+        </div>
+        <div class="actions">
+          <button class="btn" id="level-complete-next"><span>NEXT LEVEL (Soon)</span></button>
+          <button class="btn secondary" id="level-complete-retry"><span>RETRY LEVEL</span></button>
+          <button class="btn secondary" id="level-complete-menu"><span>MAIN MENU</span></button>
+        </div>
+      </div>
+    `
+    this.root.appendChild(this.levelComplete)
+    this.levelComplete.querySelector('#level-complete-next').onclick = () => {
+      alert('🎮 Level 2 is still in development! The chef is perfecting his recipe... 👨‍🍳')
+    }
+    this.levelComplete.querySelector('#level-complete-retry').onclick = () => {
+      this.showLevelComplete(false)
+      this.onNew()
+    }
+    this.levelComplete.querySelector('#level-complete-menu').onclick = () => {
+      this.showLevelComplete(false)
+      this.showMenu(true)
+    }
+
+    // Level Failed menu
+    this.levelFailed = document.createElement('div')
+    this.levelFailed.className = 'panel'
+    this.levelFailed.style.display = 'none'
+    this.levelFailed.innerHTML = `
+      <div class="card">
+        <div class="title" style="color: #ff5555;">😱 LEVEL FAILED! 😱</div>
+        <div class="subtitle" id="level-failed-subtitle">The Chef Caught You!</div>
+        <div class="blurb" id="level-failed-message">
+          Time ran out! The chef returned and found you in his kitchen. Better luck next time!
+        </div>
+        <div class="section">
+          <p style="font-size: 16px; color: #ffaa00; text-align: center; margin: 20px 0;">
+            💡 <strong>Tip:</strong> Use shift to run faster and reach the checkpoint in time!
+          </p>
+        </div>
+        <div class="actions">
+          <button class="btn" id="level-failed-retry"><span>RETRY LEVEL</span></button>
+          <button class="btn secondary" id="level-failed-menu"><span>MAIN MENU</span></button>
+        </div>
+      </div>
+    `
+    this.root.appendChild(this.levelFailed)
+    this.levelFailed.querySelector('#level-failed-retry').onclick = () => {
+      this.showLevelFailed(false)
+      this.onNew()
+    }
+    this.levelFailed.querySelector('#level-failed-menu').onclick = () => {
+      this.showLevelFailed(false)
+      this.showMenu(true)
+    }
+
     // Chef alert banner
     this.alert = document.createElement('div')
     this.alert.className = 'hud-banner'
@@ -995,6 +1066,24 @@ export class UI {
     } else {
       this.gameIsPlaying = true
       this._stopUIMusic()
+    }
+  }
+
+  showLevelComplete(show = true) {
+    this.levelComplete.style.display = show ? 'flex' : 'none'
+    if (show) {
+      this.gameIsPlaying = false
+      this._playUIMusic()
+      document.exitPointerLock?.()
+    }
+  }
+
+  showLevelFailed(show = true) {
+    this.levelFailed.style.display = show ? 'flex' : 'none'
+    if (show) {
+      this.gameIsPlaying = false
+      this._playUIMusic()
+      document.exitPointerLock?.()
     }
   }
 
