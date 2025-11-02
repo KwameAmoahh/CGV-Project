@@ -183,6 +183,18 @@ let gameStartTime = 0
 let gamePausedTime = 0
 let totalPausedDuration = 0
 
+// Level 2 state
+let chefSpatula = null
+let chefVisionCone = null
+let playerSpotted = false
+let chefPatrolWaypoints = []
+let chefPatrolIndex = 0
+let chefVisionRange = 8.0  // meters
+let chefVisionAngle = Math.PI / 3  // 60 degrees cone
+let level2CheckpointMarker = null
+let level2CheckpointReached = false
+const LEVEL2_CHECKPOINT_POS = new THREE.Vector3(10, 0, -50)  // Safe zone far from patrol route
+
 const keysPressed = {}
 
 
@@ -1528,6 +1540,182 @@ function orientTowards(direction) {
 }
 
 // ----------------------------------------------------------------------------- //
+// Level 2 Functions
+// ----------------------------------------------------------------------------- //
+
+function startLevel2() {
+  currentLevel = 2
+  levelTimer = 150  // 2.5 minutes for Level 2
+  checkpointReached = false
+  playerSpotted = false
+  gameStartTime = Date.now()
+  totalPausedDuration = 0
+  gameStarted = true
+
+  // Update UI
+  const levelTextEl = document.getElementById('level-text')
+  const warningEl = document.getElementById('warning-text')
+  if (levelTextEl) levelTextEl.textContent = 'Level 2: Kitchen Floor'
+  if (warningEl) {
+    warningEl.textContent = 'Stay hidden from the chef! Don\'t get spotted!'
+    warningEl.style.color = '#ffaa00'
+  }
+
+  // Spawn chef at specified coordinates
+  if (chefRoot) {
+    chefRoot.position.set(-12.90, 0.19, -43.35)
+    console.log('✓ Chef spawned at:', chefRoot.position)
+
+    // Load and attach spatula
+    loadSpatula()
+
+    // Setup patrol waypoints
+    setupChefPatrol()
+
+    // Start chef patrol
+    beginChefPatrol()
+  }
+
+  console.log('🎮 Level 2 started!')
+}
+
+function loadSpatula() {
+  loader.load('/assets/models/spatula.glb', (gltf) => {
+    chefSpatula = gltf.scene
+    chefSpatula.scale.setScalar(0.8)
+
+    // Find the chef's right hand bone
+    let rightHand = null
+    chefRoot.traverse((child) => {
+      const boneName = child.name?.toLowerCase() || ''
+      if (boneName.includes('hand') && boneName.includes('right')) {
+        rightHand = child
+      } else if (!rightHand && (boneName.includes('hand.r') || boneName.includes('handright'))) {
+        rightHand = child
+      }
+    })
+
+    if (rightHand) {
+      rightHand.add(chefSpatula)
+      console.log('✓ Spatula attached to chef\'s hand')
+    } else {
+      // Fallback: attach to chef root with offset
+      chefSpatula.position.set(0.5, 1.0, 0.2)
+      chefRoot.add(chefSpatula)
+      console.log('⚠️ Hand bone not found, spatula attached to chef root')
+    }
+  }, undefined, (err) => console.error('Spatula load failed:', err))
+}
+
+function setupChefPatrol() {
+  // Define patrol waypoints for the chef around the kitchen
+  chefPatrolWaypoints = [
+    new THREE.Vector3(-12.90, 0.19, -43.35),  // Starting position
+    new THREE.Vector3(-10, 0, -35),
+    new THREE.Vector3(-5, 0, -30),
+    new THREE.Vector3(0, 0, -25),
+    new THREE.Vector3(5, 0, -30),
+    new THREE.Vector3(10, 0, -35),
+    new THREE.Vector3(5, 0, -40),
+    new THREE.Vector3(0, 0, -45),
+    new THREE.Vector3(-5, 0, -45),
+  ]
+  chefPatrolIndex = 0
+  console.log('✓ Chef patrol waypoints set:', chefPatrolWaypoints.length, 'points')
+}
+
+function beginChefPatrol() {
+  // Start chef walking animation
+  const walkAction = actions.walk || actions.slowRun || actions.fallback
+  if (walkAction) {
+    playAction(walkAction)
+  }
+}
+
+function updateChefPatrol(delta) {
+  if (!chefRoot || chefPatrolWaypoints.length === 0) return
+
+  const targetWaypoint = chefPatrolWaypoints[chefPatrolIndex]
+  const chefPos = chefRoot.position
+
+  // Direction to target
+  const direction = new THREE.Vector3().subVectors(targetWaypoint, chefPos)
+  direction.y = 0  // Keep movement on ground plane
+
+  const distance = direction.length()
+
+  // If close enough to waypoint, move to next one
+  if (distance < 0.5) {
+    chefPatrolIndex = (chefPatrolIndex + 1) % chefPatrolWaypoints.length
+    return
+  }
+
+  // Move toward target
+  const speed = 1.5  // Chef walking speed
+  const movement = direction.normalize().multiplyScalar(speed * delta)
+  chefRoot.position.add(movement)
+
+  // Orient chef to face direction of movement
+  const yaw = Math.atan2(direction.x, direction.z) + ORIENTATION_OFFSET
+  chefRoot.rotation.set(0, yaw, 0)
+}
+
+function checkChefVision() {
+  if (!chefRoot || !playerModel) return
+
+  const chefPos = chefRoot.position
+  const playerPos = playerModel.position
+
+  // Vector from chef to player
+  const toPlayer = new THREE.Vector3().subVectors(playerPos, chefPos)
+  const distanceToPlayer = toPlayer.length()
+
+  // Check if player is within vision range
+  if (distanceToPlayer > chefVisionRange) return
+
+  // Get chef's forward direction
+  const chefForward = new THREE.Vector3(0, 0, -1).applyQuaternion(chefRoot.quaternion)
+  chefForward.y = 0
+  chefForward.normalize()
+
+  toPlayer.y = 0
+  toPlayer.normalize()
+
+  // Calculate angle between chef forward and direction to player
+  const angle = chefForward.angleTo(toPlayer)
+
+  // Check if player is within vision cone
+  if (angle <= chefVisionAngle) {
+    // Player is spotted!
+    playerSpotted = true
+    gameStarted = false
+
+    console.log('🚨 Player spotted by chef!')
+
+    const warningEl = document.getElementById('warning-text')
+    if (warningEl) {
+      warningEl.textContent = 'The chef spotted you!'
+      warningEl.style.color = '#ff0000'
+    }
+
+    // Stop footstep sounds
+    if (!walkingFootsteps.paused) {
+      walkingFootsteps.pause()
+      walkingFootsteps.currentTime = 0
+    }
+    if (!runningFootsteps.paused) {
+      runningFootsteps.pause()
+      runningFootsteps.currentTime = 0
+    }
+
+    // Show level failed screen
+    setTimeout(() => {
+      ui.showLevelFailed(true)
+    }, 1000)
+  }
+}
+
+// ----------------------------------------------------------------------------- //
 // Render Loop
 // ----------------------------------------------------------------------------- //
 function animate() {
@@ -1585,7 +1773,14 @@ function animate() {
       }
     }
 
-    if (!CHEF_IDLE_ONLY) updateBehavior(delta)
+    // Update chef behavior based on level
+    if (currentLevel === 2) {
+      // Level 2: Chef patrols the kitchen
+      updateChefPatrol(delta)
+    } else if (!CHEF_IDLE_ONLY) {
+      // Level 1: Original chef behavior
+      updateBehavior(delta)
+    }
 
     // Level timer update
     if (gameStartTime > 0 && !checkpointReached) {
@@ -1597,18 +1792,12 @@ function animate() {
         timerEl.style.color = timeLeft < 20 ? '#ff0000' : '#ffaa00'
       }
 
-      // Check if player reached checkpoint (example: near spawn point at x=0, z=-29)
-      if (playerModel) {
+      // Check if player reached checkpoint
+      if (playerModel && currentLevel === 1) {
         const checkpointPos = new THREE.Vector3(0, 0, -29)
         const dist = playerModel.position.distanceTo(checkpointPos)
         if (dist < 1.5) {
           checkpointReached = true
-          gameStarted = false
-          const warningEl = document.getElementById('warning-text')
-          if (warningEl) {
-            warningEl.textContent = 'Checkpoint reached! You are safe.'
-            warningEl.style.color = '#00ff00'
-          }
 
           // Stop all footstep sounds
           if (!walkingFootsteps.paused) {
@@ -1622,21 +1811,20 @@ function animate() {
           isPlayingFootsteps = false
           currentFootstepSound = null
 
-          // Show level complete screen
-          setTimeout(() => {
-            ui.showLevelComplete(true)
-          }, 500)
+          // Transition to Level 2
+          console.log('🎉 Level 1 complete! Starting Level 2...')
+          startLevel2()
         }
+      }
+
+      // Level 2: Check if player was spotted by chef
+      if (currentLevel === 2 && !playerSpotted) {
+        checkChefVision()
       }
 
       // Timer expired
       if (timeLeft <= 0 && !checkpointReached) {
         gameStarted = false
-        const warningEl = document.getElementById('warning-text')
-        if (warningEl) {
-          warningEl.textContent = 'Time\'s up! The chef caught you!'
-          warningEl.style.color = '#ff0000'
-        }
 
         // Stop all footstep sounds
         if (!walkingFootsteps.paused) {
@@ -1650,10 +1838,33 @@ function animate() {
         isPlayingFootsteps = false
         currentFootstepSound = null
 
-        // Show level failed screen
-        setTimeout(() => {
-          ui.showLevelFailed(true)
-        }, 1000)
+        // Level 2: If time's up and player wasn't spotted, they WIN!
+        if (currentLevel === 2 && !playerSpotted) {
+          const warningEl = document.getElementById('warning-text')
+          if (warningEl) {
+            warningEl.textContent = 'You survived! The chef didn\'t spot you!'
+            warningEl.style.color = '#00ff00'
+          }
+
+          console.log('🎉 Level 2 complete!')
+
+          // Show level complete screen
+          setTimeout(() => {
+            ui.showLevelComplete(true)
+          }, 500)
+        } else {
+          // Level 1: Time's up means failure
+          const warningEl = document.getElementById('warning-text')
+          if (warningEl) {
+            warningEl.textContent = 'Time\'s up! The chef caught you!'
+            warningEl.style.color = '#ff0000'
+          }
+
+          // Show level failed screen
+          setTimeout(() => {
+            ui.showLevelFailed(true)
+          }, 1000)
+        }
 
         // Prevent this from triggering multiple times
         gameStartTime = 0
