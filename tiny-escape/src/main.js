@@ -183,7 +183,7 @@ let gameStartTime = 0
 let gamePausedTime = 0
 let totalPausedDuration = 0
 
-// Level 2 state
+// Level 2+ state
 let chefSpatula = null
 let chefVisionCone = null
 let playerSpotted = false
@@ -191,9 +191,21 @@ let chefPatrolWaypoints = []
 let chefPatrolIndex = 0
 let chefVisionRange = 8.0  // meters
 let chefVisionAngle = Math.PI / 3  // 60 degrees cone
-let level2CheckpointMarker = null
-let level2CheckpointReached = false
-const LEVEL2_CHECKPOINT_POS = new THREE.Vector3(10, 0, -50)  // Safe zone far from patrol route
+let level2Checkpoints = []  // Multiple checkpoint positions
+let activeCheckpointIndex = -1  // Currently active checkpoint
+let checkpointMarkers = []  // Visual markers for checkpoints
+let directionArrow = null  // Arrow pointing to active checkpoint
+let level2CheckpointsReached = 0  // How many checkpoints player has reached
+let checkpointsToWin = 3  // Dynamic based on level
+let level1CheckpointMarker = null  // Level 1 checkpoint cylinder
+let level1CheckpointRing = null  // Level 1 checkpoint ring
+
+// Chef footstep sounds
+const chefFootsteps = new Audio('/assets/models/giant_footsteps.wav')
+chefFootsteps.loop = true
+chefFootsteps.volume = 0.8
+chefFootsteps.preload = 'auto'
+let isPlayingChefFootsteps = false
 
 const keysPressed = {}
 
@@ -360,7 +372,12 @@ document.addEventListener('keydown', (event) => {
         runningFootsteps.pause()
         runningFootsteps.currentTime = 0
       }
+      if (!chefFootsteps.paused) {
+        chefFootsteps.pause()
+        chefFootsteps.currentTime = 0
+      }
       isPlayingFootsteps = false
+      isPlayingChefFootsteps = false
       currentFootstepSound = null
 
       ui.showPause(true)
@@ -446,10 +463,79 @@ const ui = new UI({
       loadingStarted = true
       ui.showLoading(true)
       loadAllAssets()
+    } else if (assetsLoaded) {
+      // Assets already loaded, restart the game
+      currentLevel = 1
+      levelTimer = 120
+      checkpointReached = false
+      gameStartTime = Date.now()
+      totalPausedDuration = 0
+      gameStarted = true
+
+      // Reset player position
+      if (playerModel) {
+        playerModel.position.set(0, 0.25, -48)
+      }
+
+      // Show Level 1 checkpoint if hidden
+      if (level1CheckpointMarker) {
+        scene.add(level1CheckpointMarker)
+      }
+      if (level1CheckpointRing) {
+        scene.add(level1CheckpointRing)
+      }
+
+      // Remove Level 2+ elements if they exist
+      if (chefRoot) {
+        scene.remove(chefRoot)
+      }
+      for (const marker of checkpointMarkers) {
+        scene.remove(marker)
+      }
+      checkpointMarkers = []
+      if (directionArrow) {
+        scene.remove(directionArrow)
+        directionArrow = null
+      }
+
+      // Stop all sounds
+      if (!chefFootsteps.paused) {
+        chefFootsteps.pause()
+        chefFootsteps.currentTime = 0
+      }
+
+      // Close menu and start
+      ui.showMenu(false)
+      ui.showLoading(false)
+      document.body.requestPointerLock?.()
+
+      // Show level info HUD
+      const levelInfo = document.getElementById('level-info')
+      if (levelInfo) levelInfo.style.display = 'block'
     }
   },
   onNew: () => {
     location.reload()
+  },
+  onRetry: () => {
+    // Restart current level
+    if (currentLevel === 1) {
+      // Reset Level 1
+      gameStartTime = Date.now()
+      totalPausedDuration = 0
+      checkpointReached = false
+      gameStarted = true
+      levelTimer = 120
+
+      // Reset player position
+      if (playerModel) {
+        playerModel.position.set(0, 0.25, -48)
+      }
+    } else if (currentLevel === 2) {
+      startLevel2()
+    } else if (currentLevel === 3) {
+      startLevel3()
+    }
   },
   onResume: () => {
     ui.showPause(false)
@@ -473,9 +559,6 @@ const ui = new UI({
       renderer.shadowMap.enabled = settings.shadows
       console.log(`✓ Shadows ${settings.shadows ? 'enabled' : 'disabled'}`)
     }
-
-    // Note: Anti-aliasing cannot be changed after renderer creation
-    // It's a WebGL context parameter set when the renderer is created
   }
 })
 
@@ -521,6 +604,12 @@ function resumeGame() {
   if (gamePausedTime > 0) {
     totalPausedDuration += Date.now() - gamePausedTime
     gamePausedTime = 0
+  }
+
+  // Resume chef footsteps if in Level 2 or 3
+  if ((currentLevel === 2 || currentLevel === 3) && chefFootsteps.paused) {
+    chefFootsteps.play().catch(e => console.log('Chef footsteps blocked'))
+    isPlayingChefFootsteps = true
   }
 }
 
@@ -653,10 +742,10 @@ const kitchenReady = new Promise((resolve) => {
         metalness: 0.5,
         roughness: 0.3
       })
-      const checkpointMarker = new THREE.Mesh(checkpointGeometry, checkpointMaterial)
-      checkpointMarker.position.set(0, box.min.y + 0.05, -29)
-      checkpointMarker.rotation.x = Math.PI / 2
-      scene.add(checkpointMarker)
+      level1CheckpointMarker = new THREE.Mesh(checkpointGeometry, checkpointMaterial)
+      level1CheckpointMarker.position.set(0, box.min.y + 0.05, -29)
+      level1CheckpointMarker.rotation.x = Math.PI / 2
+      scene.add(level1CheckpointMarker)
 
       // Add glowing ring around checkpoint
       const ringGeometry = new THREE.TorusGeometry(0.6, 0.05, 16, 32)
@@ -665,10 +754,10 @@ const kitchenReady = new Promise((resolve) => {
         emissive: 0x00ff00,
         emissiveIntensity: 1.0
       })
-      const checkpointRing = new THREE.Mesh(ringGeometry, ringMaterial)
-      checkpointRing.position.set(0, box.min.y + 0.1, -29)
-      checkpointRing.rotation.x = Math.PI / 2
-      scene.add(checkpointRing)
+      level1CheckpointRing = new THREE.Mesh(ringGeometry, ringMaterial)
+      level1CheckpointRing.position.set(0, box.min.y + 0.1, -29)
+      level1CheckpointRing.rotation.x = Math.PI / 2
+      scene.add(level1CheckpointRing)
     },
     undefined,
     (error) => {
@@ -1548,16 +1637,27 @@ function startLevel2() {
   levelTimer = 150  // 2.5 minutes for Level 2
   checkpointReached = false
   playerSpotted = false
+  level2CheckpointsReached = 0
   gameStartTime = Date.now()
   totalPausedDuration = 0
   gameStarted = true
+
+  // Remove Level 1 checkpoint markers
+  if (level1CheckpointMarker) {
+    scene.remove(level1CheckpointMarker)
+    level1CheckpointMarker = null
+  }
+  if (level1CheckpointRing) {
+    scene.remove(level1CheckpointRing)
+    level1CheckpointRing = null
+  }
 
   // Update UI
   const levelTextEl = document.getElementById('level-text')
   const warningEl = document.getElementById('warning-text')
   if (levelTextEl) levelTextEl.textContent = 'Level 2: Kitchen Floor'
   if (warningEl) {
-    warningEl.textContent = 'Stay hidden from the chef! Don\'t get spotted!'
+    warningEl.innerHTML = 'Find checkpoints while hiding from the chef!<br>Reach 3 checkpoints to win!'
     warningEl.style.color = '#ffaa00'
   }
 
@@ -1574,15 +1674,76 @@ function startLevel2() {
 
     // Start chef patrol
     beginChefPatrol()
+
+    // Start chef footsteps from Level 2
+    if (chefFootsteps.paused) {
+      chefFootsteps.play().catch(e => console.log('Chef footsteps blocked'))
+      isPlayingChefFootsteps = true
+    }
   }
 
+  // Create checkpoint system
+  createLevel2Checkpoints()
+  createDirectionalArrow()
+
+  // Set difficulty for Level 2
+  checkpointsToWin = 3
+  chefVisionAngle = Math.PI / 3  // 60 degrees
+
   console.log('🎮 Level 2 started!')
+}
+
+function startLevel3() {
+  currentLevel = 3
+  levelTimer = 90  // 1.5 minutes for Level 3 (HARDER!)
+  checkpointReached = false
+  playerSpotted = false
+  level2CheckpointsReached = 0
+  gameStartTime = Date.now()
+  totalPausedDuration = 0
+  gameStarted = true
+
+  // Update UI
+  const levelTextEl = document.getElementById('level-text')
+  const warningEl = document.getElementById('warning-text')
+  if (levelTextEl) levelTextEl.textContent = 'Level 3: Speed Run Challenge'
+  if (warningEl) {
+    warningEl.innerHTML = 'HARD MODE! Faster chef, wider vision!<br>Reach 4 checkpoints to escape!'
+    warningEl.style.color = '#ff0000'
+  }
+
+  // Spawn chef at specified coordinates (opposite side from door)
+  if (chefRoot) {
+    chefRoot.position.set(10, 0.19, -46)  // Back right corner, far from door
+    console.log('✓ Chef spawned at:', chefRoot.position)
+
+    // Load and attach spatula
+    loadSpatula()
+
+    // Setup patrol waypoints
+    setupChefPatrol()
+
+    // Start chef patrol
+    beginChefPatrol()
+
+    // Chef footsteps already playing from Level 2
+  }
+
+  // Set difficulty for Level 3 (HARDER!)
+  checkpointsToWin = 4  // Need 4 instead of 3
+  chefVisionAngle = Math.PI / 2  // 90 degrees instead of 60!
+
+  // Create checkpoint system
+  createLevel2Checkpoints()
+  createDirectionalArrow()
+
+  console.log('🎮 Level 3 started! (HARD MODE)')
 }
 
 function loadSpatula() {
   loader.load('/assets/models/spatula.glb', (gltf) => {
     chefSpatula = gltf.scene
-    chefSpatula.scale.setScalar(0.8)
+    chefSpatula.scale.setScalar(0.07)
 
     // Find the chef's right hand bone
     let rightHand = null
@@ -1650,6 +1811,23 @@ function updateChefPatrol(delta) {
     return
   }
 
+  // Check collision with player - chef should not walk through player
+  if (playerModel) {
+    const playerPos = playerModel.position
+    const distToPlayer = new THREE.Vector3().subVectors(playerPos, chefPos)
+    distToPlayer.y = 0
+    const distanceToPlayer = distToPlayer.length()
+
+    // Stop moving if too close to player (collision detection)
+    if (distanceToPlayer < 1.5) {
+      // Chef can see player but won't walk through them
+      // Orient chef to face player
+      const yaw = Math.atan2(distToPlayer.x, distToPlayer.z) + ORIENTATION_OFFSET
+      chefRoot.rotation.set(0, yaw, 0)
+      return  // Don't move any closer
+    }
+  }
+
   // Move toward target
   const speed = 1.5  // Chef walking speed
   const movement = direction.normalize().multiplyScalar(speed * delta)
@@ -1707,12 +1885,339 @@ function checkChefVision() {
       runningFootsteps.pause()
       runningFootsteps.currentTime = 0
     }
+    if (!chefFootsteps.paused) {
+      chefFootsteps.pause()
+      chefFootsteps.currentTime = 0
+    }
 
     // Show level failed screen
     setTimeout(() => {
       ui.showLevelFailed(true)
     }, 1000)
   }
+}
+
+// ----------------------------------------------------------------------------- //
+// Level 2 Checkpoint System
+// ----------------------------------------------------------------------------- //
+
+function createLevel2Checkpoints() {
+  // Define checkpoint positions strategically around the kitchen
+  // Kitchen bounds: roughly X[-13 to 11], Z[-48 to -26]
+  // Checkpoints placed in corners/edges away from patrol route center
+
+  if (currentLevel === 3) {
+    // Level 3: 5 checkpoints including one by the door (final escape)
+    level2Checkpoints = [
+      new THREE.Vector3(-11, 0, -32),  // Left wall, upper area
+      new THREE.Vector3(9, 0, -38),    // Right wall, mid area
+      new THREE.Vector3(-9, 0, -46),   // Left corner, back
+      new THREE.Vector3(7, 0, -27),    // Right corner, front
+      new THREE.Vector3(0, 0, -26.5),  // FINAL: By the door (escape!)
+    ]
+  } else {
+    // Level 2: Original 5 checkpoints
+    level2Checkpoints = [
+      new THREE.Vector3(-11, 0, -32),  // Left wall, upper area
+      new THREE.Vector3(9, 0, -38),    // Right wall, mid area
+      new THREE.Vector3(-9, 0, -46),   // Left corner, back
+      new THREE.Vector3(7, 0, -27),    // Right corner, front
+      new THREE.Vector3(2, 0, -44),    // Right side, back area
+    ]
+  }
+
+  // Create visual markers for each checkpoint
+  const floorY = kitchenInfo?.floorY || 0
+
+  for (let i = 0; i < level2Checkpoints.length; i++) {
+    const pos = level2Checkpoints[i]
+
+    // Create glowing cylinder marker
+    const markerGeometry = new THREE.CylinderGeometry(0.6, 0.6, 0.15, 16)
+    const markerMaterial = new THREE.MeshStandardMaterial({
+      color: 0x0088ff,
+      emissive: 0x0088ff,
+      emissiveIntensity: 0.8,
+      metalness: 0.6,
+      roughness: 0.2,
+      transparent: true,
+      opacity: 0.0  // Start invisible
+    })
+    const marker = new THREE.Mesh(markerGeometry, markerMaterial)
+    marker.position.set(pos.x, floorY + 0.08, pos.z)
+    marker.rotation.x = Math.PI / 2
+    marker.userData.checkpointIndex = i
+    marker.userData.baseOpacity = 0.7
+    scene.add(marker)
+    checkpointMarkers.push(marker)
+
+    // Add glowing ring around checkpoint
+    const ringGeometry = new THREE.TorusGeometry(0.7, 0.06, 16, 32)
+    const ringMaterial = new THREE.MeshStandardMaterial({
+      color: 0x00aaff,
+      emissive: 0x00aaff,
+      emissiveIntensity: 1.2,
+      transparent: true,
+      opacity: 0.0  // Start invisible
+    })
+    const ring = new THREE.Mesh(ringGeometry, ringMaterial)
+    ring.position.set(pos.x, floorY + 0.12, pos.z)
+    ring.rotation.x = Math.PI / 2
+    ring.userData.checkpointIndex = i
+    ring.userData.isRing = true
+    ring.userData.baseOpacity = 0.9
+    scene.add(ring)
+    checkpointMarkers.push(ring)
+  }
+
+  console.log('✓ Created', level2Checkpoints.length, 'Level 2 checkpoints')
+}
+
+function createDirectionalArrow() {
+  // Create arrow pointing to active checkpoint
+  // Arrow is a cone shape that hovers above player
+  const arrowGeometry = new THREE.ConeGeometry(0.3, 0.8, 8)
+  const arrowMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffff00,
+    emissive: 0xffff00,
+    emissiveIntensity: 1.5,
+    transparent: true,
+    opacity: 0.9
+  })
+  directionArrow = new THREE.Mesh(arrowGeometry, arrowMaterial)
+  directionArrow.rotation.x = Math.PI / 2  // Point horizontally
+  directionArrow.visible = false
+  scene.add(directionArrow)
+
+  console.log('✓ Created directional arrow')
+}
+
+function updateActiveCheckpoint() {
+  if (!chefRoot || level2Checkpoints.length === 0) return
+
+  const chefPos = chefRoot.position
+
+  // Find checkpoint that is farthest from the chef (opposite side)
+  let farthestIndex = -1
+  let maxDistance = 0
+
+  for (let i = 0; i < level2Checkpoints.length; i++) {
+    const checkpointPos = level2Checkpoints[i]
+    const distance = chefPos.distanceTo(checkpointPos)
+
+    if (distance > maxDistance) {
+      maxDistance = distance
+      farthestIndex = i
+    }
+  }
+
+  // Only activate if chef is reasonably far (at least 10 meters)
+  if (maxDistance >= 10 && farthestIndex !== activeCheckpointIndex) {
+    activeCheckpointIndex = farthestIndex
+
+    // Update marker visibility
+    for (let i = 0; i < checkpointMarkers.length; i++) {
+      const marker = checkpointMarkers[i]
+      const isActive = marker.userData.checkpointIndex === activeCheckpointIndex
+      marker.material.opacity = isActive ? marker.userData.baseOpacity : 0.0
+    }
+
+    console.log('✓ Activated checkpoint', activeCheckpointIndex, 'at distance', maxDistance.toFixed(2), 'm from chef')
+  }
+}
+
+function updateDirectionalArrow(delta) {
+  if (!directionArrow || !playerModel || activeCheckpointIndex < 0) {
+    if (directionArrow) directionArrow.visible = false
+    return
+  }
+
+  const activeCheckpoint = level2Checkpoints[activeCheckpointIndex]
+  if (!activeCheckpoint) return
+
+  const playerPos = playerModel.position
+  const direction = new THREE.Vector3().subVectors(activeCheckpoint, playerPos)
+  direction.y = 0
+  direction.normalize()
+
+  // Position arrow above player's head
+  directionArrow.position.set(
+    playerPos.x,
+    playerPos.y + 2.5,  // Hover above player
+    playerPos.z
+  )
+
+  // Rotate arrow to point toward checkpoint
+  const angle = Math.atan2(direction.x, direction.z)
+  directionArrow.rotation.y = angle
+  directionArrow.rotation.x = Math.PI / 2  // Keep pointing horizontally
+
+  // Pulsing animation
+  const pulseScale = 1.0 + 0.2 * Math.sin(Date.now() * 0.005)
+  directionArrow.scale.set(pulseScale, pulseScale, pulseScale)
+
+  directionArrow.visible = true
+}
+
+function checkLevel2Checkpoint() {
+  if (!playerModel || activeCheckpointIndex < 0) return
+
+  const activeCheckpoint = level2Checkpoints[activeCheckpointIndex]
+  if (!activeCheckpoint) return
+
+  const distance = playerModel.position.distanceTo(activeCheckpoint)
+
+  // Player reached the checkpoint
+  if (distance < 1.2) {
+    level2CheckpointsReached++
+
+    console.log('✓ Checkpoint reached!', level2CheckpointsReached, '/', checkpointsToWin)
+
+    // Update UI
+    const warningEl = document.getElementById('warning-text')
+    if (warningEl) {
+      warningEl.innerHTML = `Checkpoint ${level2CheckpointsReached}/${checkpointsToWin} reached!<br>Keep hiding from the chef!`
+      warningEl.style.color = '#00ff00'
+    }
+
+    // Remove this checkpoint from the list
+    level2Checkpoints.splice(activeCheckpointIndex, 1)
+
+    // Remove visual markers for this checkpoint
+    const markersToRemove = []
+    for (let i = checkpointMarkers.length - 1; i >= 0; i--) {
+      const marker = checkpointMarkers[i]
+      if (marker.userData.checkpointIndex === activeCheckpointIndex) {
+        scene.remove(marker)
+        markersToRemove.push(i)
+      }
+    }
+    markersToRemove.forEach(idx => checkpointMarkers.splice(idx, 1))
+
+    // Update remaining marker indices
+    for (let i = 0; i < checkpointMarkers.length; i++) {
+      if (checkpointMarkers[i].userData.checkpointIndex > activeCheckpointIndex) {
+        checkpointMarkers[i].userData.checkpointIndex--
+      }
+    }
+
+    activeCheckpointIndex = -1  // Force recalculation
+
+    // Check win condition
+    if (level2CheckpointsReached >= checkpointsToWin) {
+      gameStarted = false
+      playerSpotted = false
+      checkpointReached = true
+
+      // Stop footstep sounds
+      if (!walkingFootsteps.paused) {
+        walkingFootsteps.pause()
+        walkingFootsteps.currentTime = 0
+      }
+      if (!runningFootsteps.paused) {
+        runningFootsteps.pause()
+        runningFootsteps.currentTime = 0
+      }
+      if (!chefFootsteps.paused) {
+        chefFootsteps.pause()
+        chefFootsteps.currentTime = 0
+      }
+      isPlayingChefFootsteps = false
+
+      if (currentLevel === 2) {
+        // Level 2 → Level 3
+        if (warningEl) {
+          warningEl.innerHTML = 'You reached all checkpoints!<br>Level 2 complete!'
+          warningEl.style.color = '#00ff00'
+        }
+
+        console.log('🎉 Level 2 complete! Starting Level 3...')
+
+        setTimeout(() => {
+          startLevel3()
+        }, 1500)
+      } else if (currentLevel === 3) {
+        // Level 3 → Credits (Game Complete!)
+        if (warningEl) {
+          warningEl.innerHTML = 'You escaped through the door!<br>GAME COMPLETE!'
+          warningEl.style.color = '#00ff00'
+        }
+
+        console.log('🎉🎉🎉 GAME COMPLETE! All levels finished!')
+
+        // Stop chef footsteps
+        if (!chefFootsteps.paused) {
+          chefFootsteps.pause()
+          chefFootsteps.currentTime = 0
+        }
+
+        setTimeout(() => {
+          ui.showCredits(true)
+        }, 1500)
+      }
+    }
+  }
+}
+
+function updateChefBehavior(delta) {
+  if (!chefRoot || chefPatrolWaypoints.length === 0) return
+
+  // Check if chef is in a tight space (low ceiling area)
+  const chefPos = chefRoot.position
+  const isCrawlSpace = detectCrawlSpace(chefPos)
+
+  // Update patrol movement
+  const targetWaypoint = chefPatrolWaypoints[chefPatrolIndex]
+  const direction = new THREE.Vector3().subVectors(targetWaypoint, chefPos)
+  direction.y = 0
+
+  const distance = direction.length()
+
+  // If close enough to waypoint, move to next one
+  if (distance < 0.5) {
+    chefPatrolIndex = (chefPatrolIndex + 1) % chefPatrolWaypoints.length
+    return
+  }
+
+  // Determine speed and animation based on space and level
+  let speed = currentLevel === 3 ? 2.5 : 1.5  // FASTER in Level 3!
+  let targetAction = actions.walk || actions.slowRun || actions.fallback
+
+  if (isCrawlSpace) {
+    speed = 0.8  // Slower in tight spaces
+    targetAction = actions.crawl || actions.walk || actions.fallback
+  }
+
+  // Play appropriate animation (animation handles crouch appearance)
+  if (activeAction !== targetAction) {
+    playAction(targetAction)
+  }
+
+  // Move toward target (no teleporting - smooth movement only)
+  const movement = direction.normalize().multiplyScalar(speed * delta)
+  chefRoot.position.add(movement)
+
+  // Orient chef to face direction of movement
+  const yaw = Math.atan2(direction.x, direction.z) + ORIENTATION_OFFSET
+  chefRoot.rotation.set(0, yaw, 0)
+}
+
+function detectCrawlSpace(position) {
+  // Detect if position has low ceiling (tight space)
+  // Check if there's geometry above the chef within 2 meters
+  if (!kitchenRootRef) return false
+
+  const from = new THREE.Vector3(position.x, position.y + 0.5, position.z)
+  const upDir = new THREE.Vector3(0, 1, 0)
+  spawnRay.set(from, upDir)
+
+  const hits = spawnRay.intersectObject(kitchenRootRef, true)
+  if (hits && hits.length > 0) {
+    const ceilingHeight = hits[0].distance
+    return ceilingHeight < 1.5  // Crawl if ceiling is less than 1.5m high
+  }
+
+  return false
 }
 
 // ----------------------------------------------------------------------------- //
@@ -1774,9 +2279,21 @@ function animate() {
     }
 
     // Update chef behavior based on level
-    if (currentLevel === 2) {
-      // Level 2: Chef patrols the kitchen
-      updateChefPatrol(delta)
+    if (currentLevel === 2 || currentLevel === 3) {
+      // Level 2 & 3: Chef patrols the kitchen with crawling behavior
+      updateChefBehavior(delta)
+
+      // Update checkpoint system
+      updateActiveCheckpoint()
+      updateDirectionalArrow(delta)
+
+      // Chef footstep sounds (only in Level 3)
+      if (currentLevel === 3) {
+        if (!isPlayingChefFootsteps && chefFootsteps.paused) {
+          chefFootsteps.play().catch(e => console.log('Chef footsteps blocked'))
+          isPlayingChefFootsteps = true
+        }
+      }
     } else if (!CHEF_IDLE_ONLY) {
       // Level 1: Original chef behavior
       updateBehavior(delta)
@@ -1817,9 +2334,10 @@ function animate() {
         }
       }
 
-      // Level 2: Check if player was spotted by chef
-      if (currentLevel === 2 && !playerSpotted) {
+      // Level 2 & 3: Check if player was spotted by chef and check checkpoints
+      if ((currentLevel === 2 || currentLevel === 3) && !playerSpotted) {
         checkChefVision()
+        checkLevel2Checkpoint()
       }
 
       // Timer expired
@@ -1838,20 +2356,26 @@ function animate() {
         isPlayingFootsteps = false
         currentFootstepSound = null
 
-        // Level 2: If time's up and player wasn't spotted, they WIN!
-        if (currentLevel === 2 && !playerSpotted) {
+        // Level 2+: Time's up means failure (must reach checkpoints to win)
+        if (currentLevel >= 2) {
           const warningEl = document.getElementById('warning-text')
           if (warningEl) {
-            warningEl.textContent = 'You survived! The chef didn\'t spot you!'
-            warningEl.style.color = '#00ff00'
+            warningEl.innerHTML = 'Time\'s up! You didn\'t reach enough checkpoints!<br>Only reached ' + level2CheckpointsReached + '/' + checkpointsToWin
+            warningEl.style.color = '#ff0000'
           }
 
-          console.log('🎉 Level 2 complete!')
+          console.log('⏰ Level 2 failed - time\'s up!')
 
-          // Show level complete screen
+          // Stop chef footsteps
+          if (!chefFootsteps.paused) {
+            chefFootsteps.pause()
+            chefFootsteps.currentTime = 0
+          }
+
+          // Show level failed screen
           setTimeout(() => {
-            ui.showLevelComplete(true)
-          }, 500)
+            ui.showLevelFailed(true)
+          }, 1000)
         } else {
           // Level 1: Time's up means failure
           const warningEl = document.getElementById('warning-text')

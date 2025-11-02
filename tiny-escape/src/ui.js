@@ -1,10 +1,11 @@
 export class UI {
-  constructor({ onStart, onNew, onResume, onExit, onSettingsChange }) {
+  constructor({ onStart, onNew, onResume, onExit, onSettingsChange, onRetry }) {
     this.onStart = onStart || (()=>{})
     this.onNew = onNew || (()=>{})
     this.onResume = onResume || (()=>{})
     this.onExit = onExit || (()=>{})
     this.onSettingsChange = onSettingsChange || (()=>{})
+    this.onRetry = onRetry || (()=>{})
 
     this.settings = {
       volume: 0.7,
@@ -935,7 +936,7 @@ export class UI {
     }
     this.levelComplete.querySelector('#level-complete-retry').onclick = () => {
       this.showLevelComplete(false)
-      this.onNew()
+      this.onRetry()
     }
     this.levelComplete.querySelector('#level-complete-menu').onclick = () => {
       this.showLevelComplete(false)
@@ -967,10 +968,60 @@ export class UI {
     this.root.appendChild(this.levelFailed)
     this.levelFailed.querySelector('#level-failed-retry').onclick = () => {
       this.showLevelFailed(false)
-      this.onNew()
+      this.onRetry()
     }
     this.levelFailed.querySelector('#level-failed-menu').onclick = () => {
       this.showLevelFailed(false)
+      this.showMenu(true)
+    }
+
+    // Credits menu (Game Complete!)
+    this.credits = document.createElement('div')
+    this.credits.className = 'panel'
+    this.credits.style.display = 'none'
+    this.credits.innerHTML = `
+      <div class="particles" id="credits-particles"></div>
+      <div class="card" style="max-height: 90vh; overflow-y: auto;">
+        <div class="title" style="color: #00ff00; font-size: 36px;">🎉 GAME COMPLETE! 🎉</div>
+        <div class="subtitle" style="font-size: 20px; color: #ffaa00;">You Escaped the Mad Chef's Kitchen!</div>
+        <div class="blurb" style="text-align: center; font-size: 18px; margin: 20px 0;">
+          Congratulations! You successfully navigated through all three levels,<br>
+          outsmarted the chef, and made it to freedom!
+        </div>
+
+        <div class="section" style="margin-top: 30px;">
+          <div class="section-title" style="text-align: center; font-size: 20px;">CREDITS</div>
+
+          <div style="text-align: center; margin: 25px 0; line-height: 1.8;">
+            <p style="font-size: 16px; margin: 10px 0;"><strong style="color: #6ab4ff;">Game Design & Programming</strong><br>Ctrl+Alt+Delinquent</p>
+
+            <p style="font-size: 16px; margin: 15px 0;"><strong style="color: #6ab4ff;">3D Character Animations</strong><br>Maximo by Adobe<br><span style="font-size: 14px; opacity: 0.7;">(Character rigging and motion capture)</span></p>
+
+            <p style="font-size: 16px; margin: 15px 0;"><strong style="color: #6ab4ff;">Sound Effects</strong><br>Mixkit<br><span style="font-size: 14px; opacity: 0.7;">(Sci-Fi sounds, footsteps, and audio effects)</span></p>
+
+            <p style="font-size: 16px; margin: 15px 0;"><strong style="color: #6ab4ff;">3D Engine</strong><br>Three.js<br><span style="font-size: 14px; opacity: 0.7;">(WebGL 3D graphics library)</span></p>
+
+            <p style="font-size: 18px; margin: 30px 0; color: #ffaa00;"><strong>Thank you for playing!</strong></p>
+
+            <p style="font-size: 14px; opacity: 0.8; margin: 20px 0;">
+              "Tiny Escape: MadChef's Kitchen Adventure"<br>
+            </p>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="btn" id="credits-replay"><span>PLAY AGAIN</span></button>
+          <button class="btn secondary" id="credits-menu"><span>MAIN MENU</span></button>
+        </div>
+      </div>
+    `
+    this.root.appendChild(this.credits)
+    this.credits.querySelector('#credits-replay').onclick = () => {
+      this.showCredits(false)
+      this.onNew()
+    }
+    this.credits.querySelector('#credits-menu').onclick = () => {
+      this.showCredits(false)
       this.showMenu(true)
     }
 
@@ -1080,6 +1131,15 @@ export class UI {
 
   showLevelFailed(show = true) {
     this.levelFailed.style.display = show ? 'flex' : 'none'
+    if (show) {
+      this.gameIsPlaying = false
+      this._playUIMusic()
+      document.exitPointerLock?.()
+    }
+  }
+
+  showCredits(show = true) {
+    this.credits.style.display = show ? 'flex' : 'none'
     if (show) {
       this.gameIsPlaying = false
       this._playUIMusic()
