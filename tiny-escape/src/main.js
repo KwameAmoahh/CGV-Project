@@ -71,8 +71,11 @@ let minimapTime = 0
 const controls = new OrbitControls(camera, renderer.domElement)
 controls.target.set(0, 1.6, 0)
 controls.enableDamping = true
-controls.minDistance = 0.5
-controls.maxDistance = 80
+controls.dampingFactor = 0.08 // Smoother camera movement
+controls.rotateSpeed = 0.5 // Easier mouse rotation (lower = easier)
+controls.panSpeed = 0.8
+controls.minDistance = 1.5 // Much closer to player
+controls.maxDistance = 3.0 // Keep camera close
 controls.update()
 
 // ----------------------------------------------------------------------------- //
@@ -145,6 +148,14 @@ let chefFloorY = 0
 let playerMixer = null
 let playerControls = null
 let playerModel = null
+
+// Game state
+let currentLevel = 1
+let levelTimer = 120 // seconds (2 minutes)
+let checkpointReached = false
+let gameStartTime = 0
+let gamePausedTime = 0
+let totalPausedDuration = 0
 
 const keysPressed = {}
 
@@ -300,6 +311,7 @@ document.addEventListener('keydown', (event) => {
   if (key === 'escape') {
     if (gameStarted && !ui.pause.style.display || ui.pause.style.display === 'none') {
       gameStarted = false
+      gamePausedTime = Date.now() // Track when we paused
       ui.showPause(true)
       document.exitPointerLock?.()
     } else if (ui.pause.style.display === 'flex') {
@@ -440,11 +452,21 @@ function startGame() {
   // Show the game canvas now that everything is loaded
   renderer.domElement.style.display = 'block';
   document.body.requestPointerLock?.()
+
+  // Start the level timer
+  gameStartTime = Date.now()
+  totalPausedDuration = 0
 }
 
 function resumeGame() {
   gameStarted = true
   document.body.requestPointerLock?.()
+
+  // Track how long we were paused
+  if (gamePausedTime > 0) {
+    totalPausedDuration += Date.now() - gamePausedTime
+    gamePausedTime = 0
+  }
 }
 
 // Asset loading with progress tracking
@@ -566,6 +588,32 @@ const kitchenReady = new Promise((resolve) => {
       resolve(kitchenInfo)
       buildOutside()
       if (USE_OBJECT_COLLIDERS) buildKitchenColliders()
+
+      // Add checkpoint marker for Level 1
+      const checkpointGeometry = new THREE.CylinderGeometry(0.5, 0.5, 0.1, 16)
+      const checkpointMaterial = new THREE.MeshStandardMaterial({
+        color: 0x00ff00,
+        emissive: 0x00ff00,
+        emissiveIntensity: 0.5,
+        metalness: 0.5,
+        roughness: 0.3
+      })
+      const checkpointMarker = new THREE.Mesh(checkpointGeometry, checkpointMaterial)
+      checkpointMarker.position.set(0, box.min.y + 0.05, -29)
+      checkpointMarker.rotation.x = Math.PI / 2
+      scene.add(checkpointMarker)
+
+      // Add glowing ring around checkpoint
+      const ringGeometry = new THREE.TorusGeometry(0.6, 0.05, 16, 32)
+      const ringMaterial = new THREE.MeshStandardMaterial({
+        color: 0x00ff00,
+        emissive: 0x00ff00,
+        emissiveIntensity: 1.0
+      })
+      const checkpointRing = new THREE.Mesh(ringGeometry, ringMaterial)
+      checkpointRing.position.set(0, box.min.y + 0.1, -29)
+      checkpointRing.rotation.x = Math.PI / 2
+      scene.add(checkpointRing)
     },
     undefined,
     (error) => {
@@ -588,12 +636,6 @@ loader.load('/assets/models/player.glb', (gltf) => {
 
   kitchenReady.then((info) => {
     if (!info) return
-    const spawnPt = pickInteriorPoint(true)
-    if (spawnPt) {
-      playerModel.position.copy(spawnPt)
-      playerModel.position.y = spawnPt.y
-    }
-    scene.add(playerModel)
 
     const mixer = new THREE.AnimationMixer(playerModel)
     const animationsMap = new Map()
@@ -613,8 +655,20 @@ loader.load('/assets/models/player.glb', (gltf) => {
     if (playerControls) {
       playerControls.setEnvironment(makeKitchenEnvironment())
       playerControls.toggleRun = false
-      const camPos = playerControls.getThirdPersonCameraPos()
-      camera.position.copy(camPos)
+
+      // Level 1: Spawn inside top freezer of fridge (near eggs)
+      // IMPORTANT: Spawn at EXACTLY the floor level (y=6.0) to prevent falling
+      const freezerSpawn = new THREE.Vector3(12.5, 6.0, -37.5)
+      playerModel.position.copy(freezerSpawn)
+      scene.add(playerModel)
+
+      // Mark player as grounded to prevent initial fall
+      playerControls.velocityY = 0
+      playerControls.isOnGround = true
+
+      // Set camera VERY close to player's back (minDistance)
+      const cameraOffset = new THREE.Vector3(0, 1.4, 1.5) // Behind and slightly above
+      camera.position.copy(playerModel.position).add(cameraOffset)
       playerControls.updateCameraTarget(0, 0)
       controls.target.copy(playerControls.cameraTarget)
       controls.update()
@@ -902,6 +956,19 @@ function makeKitchenEnvironment() {
     // Get ground height beneath a position
     getGroundInfo(pos, maxDistance = 8) {
       if (!kitchenRootRef) return { y: 0, surface: null }
+
+      // Special handling for top freezer area
+      // Check ONLY X/Z position - ignore Y to prevent falling through during spawn
+      // Generous bounds to allow free movement in the freezer
+      const inFridgeX = pos.x >= 9.5 && pos.x <= 14.0
+      const inFridgeZ = pos.z >= -39.0 && pos.z <= -35.0
+      const inTopFreezer = inFridgeX && inFridgeZ
+
+      if (inTopFreezer) {
+        // ALWAYS return top freezer floor when in this X/Z area
+        return { y: 6.0, surface: null }
+      }
+
       const from = new THREE.Vector3(pos.x, pos.y + 2, pos.z)
       spawnRay.set(from, new THREE.Vector3(0, -1, 0))
       const hits = spawnRay.intersectObject(kitchenRootRef, true)
@@ -920,6 +987,14 @@ function makeKitchenEnvironment() {
     // -------------------------------------------------------------------------
     resolveCollision(current, desired, radius = 0.12) {
   if (!kitchenInfo) return desired.clone()
+
+  // Skip collision resolution in top freezer - elevated floor doesn't work with ground-level collision
+  const inFridgeX = desired.x >= 9.5 && desired.x <= 14.0
+  const inFridgeZ = desired.z >= -39.0 && desired.z <= -35.0
+  if (inFridgeX && inFridgeZ) {
+    return desired.clone()
+  }
+
   if (!kitchenColliders.length) {
     const bx = kitchenInfo.box
     const margin = WALL_THICKNESS
@@ -1183,6 +1258,9 @@ console.log('[Colliders] ✓ Added collision box for x=11.76 gap (x=11.5-12.0, z
   )
   kitchenColliders.push({ box: midLeftWallGap, name: 'Manual: Mid Left Wall Gap z=-46' })
   console.log('[Colliders] ✓ Added collision box at x=-11.85 to -8.61, z=-46.49 to -46.14')
+
+  // NOTE: Top freezer walls removed - collision system doesn't handle elevated floors properly
+  // Floor detection keeps player at Y=6.0, so no walls needed if floor area is correct
 }
 function clearColliderHelpers() {
   if (colliderHelpers.length) {
@@ -1418,6 +1496,40 @@ function animate() {
     if (playerControls) playerControls.update(delta, keysPressed)
 
     if (!CHEF_IDLE_ONLY) updateBehavior(delta)
+
+    // Level timer update
+    if (gameStartTime > 0 && !checkpointReached) {
+      const elapsed = (Date.now() - gameStartTime - totalPausedDuration) / 1000
+      const timeLeft = Math.max(0, levelTimer - elapsed)
+      const timerEl = document.getElementById('timer-text')
+      if (timerEl) {
+        timerEl.textContent = `Time: ${Math.ceil(timeLeft)}s`
+        timerEl.style.color = timeLeft < 20 ? '#ff0000' : '#ffaa00'
+      }
+
+      // Check if player reached checkpoint (example: near spawn point at x=0, z=-29)
+      if (playerModel) {
+        const checkpointPos = new THREE.Vector3(0, 0, -29)
+        const dist = playerModel.position.distanceTo(checkpointPos)
+        if (dist < 1.5) {
+          checkpointReached = true
+          const warningEl = document.getElementById('warning-text')
+          if (warningEl) {
+            warningEl.textContent = 'Checkpoint reached! You are safe.'
+            warningEl.style.color = '#00ff00'
+          }
+        }
+      }
+
+      // Timer expired
+      if (timeLeft <= 0 && !checkpointReached) {
+        const warningEl = document.getElementById('warning-text')
+        if (warningEl) {
+          warningEl.textContent = 'Time\'s up! The chef caught you!'
+          warningEl.style.color = '#ff0000'
+        }
+      }
+    }
   }
 
   controls.update()
